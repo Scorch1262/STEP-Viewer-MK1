@@ -346,7 +346,8 @@ class MainWindow(QMainWindow):
     def _init_viewport(self):
         log.info("Hauptfenster sichtbar – starte 3D-Ansicht")
         self.viewport.set_axes_visible(self.a_axes.isChecked())
-        self.viewport.initialize()
+        if not self.viewport.initialize():
+            self.status_label.setText("3D-Ansicht nicht verfügbar (kein OpenGL 3.2) – Grafiktreiber prüfen")
         self.viewport.render()
         for path in self._pending_files:
             self.open_file(path)
@@ -364,7 +365,7 @@ class MainWindow(QMainWindow):
             self.open_file(self.model.path)
 
     def open_file(self, path: str):
-        if not self.viewport._ready:
+        if not self.viewport._ready and not self.viewport._failed:
             self._pending_files.append(path)
             return
         log.info("Öffne %s", path)

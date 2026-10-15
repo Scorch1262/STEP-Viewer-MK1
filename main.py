@@ -148,7 +148,10 @@ def _start_smoketest(app, win, path, log, logpath):
 
     def check():
         elapsed = time.monotonic() - start
-        if win.viewport._ready and win.model is not None:
+        if win.viewport._failed:
+            log.error("SMOKETEST: OpenGL 3.2 nicht verfügbar")
+            app.exit(4)
+        elif win.viewport._ready and win.model is not None:
             log.info("SMOKETEST OK nach %.1f s", elapsed)
             app.exit(0)
         elif elapsed > 60:

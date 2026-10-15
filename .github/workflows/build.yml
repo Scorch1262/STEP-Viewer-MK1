@@ -54,9 +54,15 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          # Der Runner hat keine Grafikkarte (nur OpenGL 1.1). Für den Test wird die
+          # Software-OpenGL-Bibliothek von Qt (Mesa) neben die exe gelegt und danach entfernt.
+          $sw = Get-ChildItem -Recurse -Filter opengl32sw.dll dist\STEP-Viewer-MK1 | Select-Object -First 1
+          if (-not $sw) { $sw = Get-ChildItem -Recurse -Filter opengl32sw.dll (python -c "import PySide6,os;print(os.path.dirname(PySide6.__file__))") | Select-Object -First 1 }
+          if ($sw) { Copy-Item $sw.FullName "dist\STEP-Viewer-MK1\opengl32.dll"; Write-Host "Software-OpenGL: $($sw.FullName)" }
           $p = Start-Process -FilePath "dist\STEP-Viewer-MK1\STEP-Viewer-MK1.exe" `
                -ArgumentList '--smoketest', 'beispiele\Halter-Baugruppe.step' -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); Write-Host "::warning::Programm reagiert nach 90 s nicht" }
+          Remove-Item "dist\STEP-Viewer-MK1\opengl32.dll" -ErrorAction SilentlyContinue
           Write-Host "----- Protokoll -----"
           Get-Content "$env:LOCALAPPDATA\STEP-Viewer-MK1\logs\stepviewer.log" -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { throw "Starttest fehlgeschlagen (Code $($p.ExitCode))" }
@@ -125,6 +131,10 @@ jobs:
           for i in $(seq 1 90); do sleep 1; kill -0 $PID 2>/dev/null || break; done
           if kill -0 $PID 2>/dev/null; then
             echo "::warning::Programm reagiert nach 90 s nicht – wird beendet"
+            echo "----- Nativer Aufrufstapel (sample) -----"
+            sample $PID 3 -file sample.txt >/dev/null 2>&1 || true
+            # nur den Haupt-Thread ausgeben (gekürzt)
+            awk '/Thread_[0-9]+.*DispatchQueue_1/{p=1} p{print; n++} n>120{exit}' sample.txt || true
             kill -9 $PID; CODE=124
           else
             wait $PID; CODE=$?

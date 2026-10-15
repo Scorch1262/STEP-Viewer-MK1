@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import sys
 from typing import Optional
 
 # Qt-Bindung für die VTK-Einbettung festlegen (vor dem Import!)
@@ -13,6 +15,16 @@ vtkmodules.qt.PyQtImpl = "PySide6"
 
 log = logging.getLogger("stepviewer.viewer")
 
+# Darstellungsart:
+#  "native"    – VTK zeichnet direkt in ein natives Unterfenster (schnell; Windows/Linux)
+#  "offscreen" – VTK rendert unsichtbar, Qt zeigt das fertige Bild an (macOS).
+#                Unter macOS hängt ein eigener VTK-OpenGL-Kontext am Qt-Fenster
+#                die Oberfläche beim Neuzeichnen auf.
+# Überschreibbar mit der Umgebungsvariable STEPVIEWER_RENDER=native|offscreen
+RENDER_MODE = os.environ.get("STEPVIEWER_RENDER", "").lower() or (
+    "offscreen" if sys.platform == "darwin" else "native")
+OFFSCREEN = RENDER_MODE == "offscreen"
+
 # Diese Module müssen importiert werden, damit Rendering und Text funktionieren
 import vtkmodules.vtkInteractionStyle  # noqa: F401,E402
 import vtkmodules.vtkRenderingFreeType  # noqa: F401,E402
@@ -20,6 +32,9 @@ import vtkmodules.vtkRenderingOpenGL2  # noqa: F401,E402
 import vtkmodules.vtkRenderingContextOpenGL2  # noqa: F401,E402
 
 from PySide6.QtCore import Qt, Signal  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PySide6.QtWidgets import QWidget  # noqa: E402
+from vtkmodules.vtkCommonCore import vtkUnsignedCharArray  # noqa: E402
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor  # noqa: E402
 from vtkmodules.vtkCommonMath import vtkMatrix4x4  # noqa: E402
 from vtkmodules.vtkFiltersSources import vtkLineSource, vtkSphereSource  # noqa: E402
@@ -28,6 +43,7 @@ from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget  # noqa:
 from vtkmodules.vtkIOImage import vtkPNGWriter  # noqa: E402
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor  # noqa: E402
 from vtkmodules.vtkRenderingCore import (  # noqa: E402
+    vtkRenderWindow,
     vtkActor,
     vtkBillboardTextActor3D,
     vtkCellPicker,
@@ -109,12 +125,32 @@ class Viewport(QVTKRenderWindowInteractor):
     measured = Signal(float, tuple)  # Abstand, (dx, dy, dz)
     measureStatus = Signal(str)
 
+    _suppress_winid = False
+
     def __init__(self, parent=None):
-        super().__init__(parent)
-        # Wichtig für macOS: vor dem Anzeigen des Fensters darf VTK nicht rendern,
-        # sonst hängt das Programm beim Start (Cocoa-Fenster existiert noch nicht).
+        if OFFSCREEN:
+            rw = vtkRenderWindow()
+            rw.SetOffScreenRendering(1)
+            # Die VTK-Klasse fragt winId() ab – das würde ein natives Fenster
+            # erzeugen. Im Offscreen-Modus soll das Widget ein normales Qt-Widget bleiben.
+            Viewport._suppress_winid = True
+            try:
+                super().__init__(parent, rw=rw)
+            finally:
+                Viewport._suppress_winid = False
+            self.setAttribute(Qt.WA_PaintOnScreen, False)
+            self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+            self.setAttribute(Qt.WA_NoSystemBackground, True)
+        else:
+            super().__init__(parent)
+        # Vor dem Anzeigen des Fensters darf VTK nicht rendern.
         self._ready = False
+        self._failed = False
         self._Iren.EnableRenderOff()  # auch Mausaktionen rendern erst nach dem Start
+        if OFFSCREEN:
+            # Renderwünsche des Interaktors (Drehen, Zoomen …) als Qt-Neuzeichnen ausführen
+            self._Iren.AddObserver("RenderEvent", lambda *a: self.update())
+        log.info("Darstellung: %s", RENDER_MODE)
         self.setFocusPolicy(Qt.StrongFocus)
         self.renderer = vtkRenderer()
         self.renderer.GradientBackgroundOn()
@@ -156,20 +192,95 @@ class Viewport(QVTKRenderWindowInteractor):
         self.camera.ParallelProjectionOn()
 
     # -- Lebenszyklus --------------------------------------------------------
-    def initialize(self):
+    def initialize(self) -> bool:
         """Wird aufgerufen, sobald das Hauptfenster sichtbar ist."""
-        if self._ready:
-            return
+        if self._ready or self._failed:
+            return self._ready
         log.info("VTK wird initialisiert …")
+        rw = self.GetRenderWindow()
+        try:
+            supported = rw.SupportsOpenGL()
+        except Exception:  # noqa: BLE001
+            supported = 1
+        if not supported:
+            self._failed = True
+            log.error("OpenGL 3.2 wird von diesem System nicht unterstützt – 3D-Ansicht deaktiviert")
+            self.update()
+            return False
+        if OFFSCREEN:
+            self._resize_offscreen()
         self.Initialize()
-        self._Iren.EnableRenderOn()
+        if not OFFSCREEN:
+            self._Iren.EnableRenderOn()
         self._ready = True
         self._enable_axes()
         log.info("VTK initialisiert")
+        return True
+
+    # -- Offscreen-Modus (macOS) ---------------------------------------------
+    def winId(self):  # noqa: N802
+        if Viewport._suppress_winid:
+            return 0
+        return super().winId()
+
+    def paintEngine(self):  # noqa: N802
+        if OFFSCREEN:
+            return QWidget.paintEngine(self)
+        return super().paintEngine()
+
+    def _resize_offscreen(self):
+        scale = self.devicePixelRatioF()
+        w = max(1, int(round(self.width() * scale)))
+        h = max(1, int(round(self.height() * scale)))
+        rw = self.GetRenderWindow()
+        rw.SetDPI(int(round(72 * scale)))
+        rw.SetSize(w, h)
+        self._Iren.SetSize(w, h)
+
+    def resizeEvent(self, ev):  # noqa: N802
+        if OFFSCREEN:
+            self._resize_offscreen()
+            self._Iren.ConfigureEvent()
+            self.update()
+            return
+        super().resizeEvent(ev)
+
+    def _paint_message(self, text: str):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(30, 32, 38))
+        if text:
+            p.setPen(QColor(200, 205, 215))
+            p.drawText(self.rect(), Qt.AlignCenter | Qt.TextWordWrap, text)
+        p.end()
 
     def paintEvent(self, ev):  # noqa: N802
-        if self._ready:
+        if self._failed:
+            self._paint_message(
+                "3D-Ansicht nicht verfügbar:\nDieses System bietet kein OpenGL 3.2.\n"
+                "Bitte Grafiktreiber aktualisieren.")
+            return
+        if not self._ready:
+            if OFFSCREEN:
+                self._paint_message("")
+            return
+        if not OFFSCREEN:
             super().paintEvent(ev)
+            return
+        try:
+            rw = self.GetRenderWindow()
+            rw.Render()
+            w, h = rw.GetSize()
+            data = vtkUnsignedCharArray()
+            rw.GetRGBACharPixelData(0, 0, w - 1, h - 1, 0, data)
+            buf = memoryview(data).tobytes()
+            img = QImage(buf, w, h, w * 4, QImage.Format_RGBA8888)
+            img = img.flipped(Qt.Vertical) if hasattr(img, "flipped") else img.mirrored(False, True)
+            img.setDevicePixelRatio(self.devicePixelRatioF())
+            p = QPainter(self)
+            p.drawImage(0, 0, img)
+            p.end()
+        except Exception:  # noqa: BLE001
+            log.exception("Offscreen-Darstellung fehlgeschlagen")
 
     def Finalize(self):  # noqa: N802
         if not self._ready:
@@ -531,6 +642,9 @@ class Viewport(QVTKRenderWindowInteractor):
     def render(self):
         """Neuzeichnen – erst wenn das Fenster bereit ist (wichtig für macOS)."""
         if not self._ready:
+            return
+        if OFFSCREEN:
+            self.update()
             return
         try:
             self.render_window.Render()

@@ -1,5 +1,15 @@
 # Änderungen
 
+## 1.0.3
+- macOS: neue Offscreen-Darstellung. VTK rendert unsichtbar im Hintergrund, Qt zeigt das fertige
+  Bild an. Damit hängt kein eigener VTK-OpenGL-Kontext mehr am Programmfenster – dieser hat die
+  Oberfläche beim ersten Neuzeichnen nach dem Start blockiert (Hänger nach „Öffne …“).
+- Windows/Linux zeichnen weiterhin direkt (schneller); umschaltbar mit STEPVIEWER_RENDER=native|offscreen
+- Prüfung auf OpenGL 3.2 beim Start: ohne passende Grafik stürzt das Programm nicht mehr ab, sondern
+  zeigt einen Hinweis in der 3D-Ansicht; Modellbaum und Infos funktionieren weiter
+- Build: Starttest unter Windows mit Software-OpenGL (Mesa), unter macOS wird bei einem Hänger der
+  native Aufrufstapel ins Log geschrieben
+
 ## 1.0.2
 - macOS: Programm hing beim Öffnen einer Datei (Fenster ohne Reaktion). Das Laden lief in einem
   Hintergrund-Thread, der sich unter macOS mit der Oberfläche gegenseitig blockierte.
