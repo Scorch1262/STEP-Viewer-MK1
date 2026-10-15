@@ -1,0 +1,148 @@
+name: Build STEP-Viewer-MK1
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  windows:
+    name: Windows (exe + Setup)
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Icon und Versionsinfo erzeugen
+        id: ver
+        shell: bash
+        run: |
+          python tools/make_icon.py
+          VERSION=$(python tools/make_version_info.py)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: exe bauen (PyInstaller)
+        run: pyinstaller --noconfirm STEP-Viewer-MK1.spec
+
+      - name: Selbsttest (Beispieldatei laden)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\STEP-Viewer-MK1\STEP-Viewer-MK1.exe" `
+               -ArgumentList '--selftest', 'beispiele\Halter-Baugruppe.step' -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Code $($p.ExitCode))" }
+
+      - name: Portable ZIP packen
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          7z a -tzip -mx=7 "release\STEP-Viewer-MK1-${{ steps.ver.outputs.version }}-Windows-portable.zip" ".\dist\STEP-Viewer-MK1"
+          if ($LASTEXITCODE -ne 0) { throw "ZIP fehlgeschlagen" }
+
+      - name: Setup bauen (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" "installer\STEP-Viewer-MK1.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup fehlgeschlagen" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: STEP-Viewer-MK1-Windows
+          path: release/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS (App, Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Abhängigkeiten installieren
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Icon und Version
+        id: ver
+        run: |
+          python tools/make_icon.py
+          VERSION=$(python tools/make_version_info.py)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: App bauen (PyInstaller)
+        run: pyinstaller --noconfirm STEP-Viewer-MK1.spec
+
+      - name: Selbsttest (Beispieldatei laden)
+        run: |
+          "dist/STEP-Viewer-MK1.app/Contents/MacOS/STEP-Viewer-MK1" --selftest beispiele/Halter-Baugruppe.step
+
+      - name: Signieren (ad hoc) und DMG/ZIP packen
+        run: |
+          codesign --force --deep --sign - "dist/STEP-Viewer-MK1.app" || true
+          mkdir -p release dmg
+          cp -R "dist/STEP-Viewer-MK1.app" dmg/
+          ln -s /Applications dmg/Programme
+          hdiutil create -volname "STEP-Viewer-MK1" -srcfolder dmg -ov -format UDZO \
+            "release/STEP-Viewer-MK1-${{ steps.ver.outputs.version }}-macOS.dmg"
+          ditto -c -k --keepParent "dist/STEP-Viewer-MK1.app" \
+            "release/STEP-Viewer-MK1-${{ steps.ver.outputs.version }}-macOS.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: STEP-Viewer-MK1-macOS
+          path: release/*
+          if-no-files-found: error
+
+  release:
+    name: Release veröffentlichen
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release-Text aus CHANGELOG
+        run: |
+          VERSION="${{ needs.windows.outputs.version }}"
+          awk -v v="## $VERSION" '$0 ~ "^## " {p = ($0 ~ "^"v)} p' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then echo "Version $VERSION" > release-notes.md; fi
+          cat release-notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.windows.outputs.version }}
+          name: STEP-Viewer-MK1 v${{ needs.windows.outputs.version }}
+          body_path: release-notes.md
+          files: artifacts/*
+          make_latest: true
