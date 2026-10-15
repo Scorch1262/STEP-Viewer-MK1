@@ -6,7 +6,7 @@ import logging
 import os
 import time
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEventLoop, QSettings, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,31 +40,6 @@ log = logging.getLogger("stepviewer.main")
 ROLE_NODE = Qt.UserRole + 1
 
 
-class LoadWorker(QObject):
-    progress = Signal(int, str)
-    finished = Signal(object, float)
-    failed = Signal(str)
-
-    def __init__(self, path: str, quality: str):
-        super().__init__()
-        self.path = path
-        self.quality = quality
-
-    @Slot()
-    def run(self):
-        start = time.perf_counter()
-        try:
-            loader = ModelLoader(self.quality, progress=lambda p, t: self.progress.emit(p, t))
-            model = loader.load(self.path)
-        except LoadError as exc:
-            self.failed.emit(str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            self.failed.emit(f"Unerwarteter Fehler beim Laden:\n{exc}")
-            return
-        self.finished.emit(model, time.perf_counter() - start)
-
-
 class MainWindow(QMainWindow):
     def __init__(self, icon: QIcon | None = None):
         super().__init__()
@@ -72,8 +47,9 @@ class MainWindow(QMainWindow):
         self.model: LoadedModel | None = None
         self.part_map: dict = {}
         self.item_for_node: dict = {}
-        self._thread: QThread | None = None
-        self._worker: LoadWorker | None = None
+        self._loading = False
+        self._last_events = 0.0
+        self._last_stage = ""
         self._updating_tree = False
         self._load_time = 0.0
         self.sm_thread: spacemouse.SpaceMouseThread | None = None
@@ -357,9 +333,6 @@ class MainWindow(QMainWindow):
         self.settings.setValue("spacemouse", self.a_spacemouse.isChecked())
         if self.sm_thread is not None:
             self.sm_thread.stop()
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(2000)
         self.viewport.Finalize()
         super().closeEvent(ev)
 
@@ -395,7 +368,7 @@ class MainWindow(QMainWindow):
             self._pending_files.append(path)
             return
         log.info("Öffne %s", path)
-        if self._thread is not None and self._thread.isRunning():
+        if self._loading:
             self.statusBar().showMessage("Es wird bereits eine Datei geladen …", 3000)
             return
         if not path.lower().endswith(SUPPORTED_EXT):
@@ -403,24 +376,42 @@ class MainWindow(QMainWindow):
             return
         self.settings.setValue("lastDir", os.path.dirname(path))
         self._add_recent(path)
+        self._loading = True
         self.progress.setValue(0)
         self.progress.setVisible(True)
         self.status_label.setText(f"Lade {os.path.basename(path)} …")
         self.a_open.setEnabled(False)
         self.a_reload.setEnabled(False)
-        QApplication.setOverrideCursor(Qt.BusyCursor)
+        # Laden im Haupt-Thread: unter macOS blockierten sich ein Lade-Thread
+        # (Open CASCADE/VTK) und die Oberfläche gegenseitig.
+        QTimer.singleShot(0, lambda: self._load(path))
 
-        self._thread = QThread(self)
-        self._worker = LoadWorker(path, self.quality)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._on_loaded)
-        self._worker.failed.connect(self._on_failed)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
-        self._thread.finished.connect(self._worker.deleteLater)
-        self._thread.start()
+    def _load(self, path: str):
+        start = time.perf_counter()
+        self._last_stage = ""
+        try:
+            loader = ModelLoader(self.quality, progress=self._load_progress)
+            model = loader.load(path)
+        except LoadError as exc:
+            self._on_failed(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Fehler beim Laden")
+            self._on_failed(f"Unerwarteter Fehler beim Laden:\n{exc}")
+            return
+        self._on_loaded(model, time.perf_counter() - start)
+
+    def _load_progress(self, pct: int, text: str):
+        stage = text.split(" ")[0]
+        if stage != self._last_stage:
+            self._last_stage = stage
+            log.info("Laden %d %%: %s", pct, text)
+        self._on_progress(pct, text)
+        # Oberfläche zwischendurch aktualisieren (ohne Benutzereingaben)
+        now = time.perf_counter()
+        if now - self._last_events > 0.05:
+            self._last_events = now
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
 
     @Slot(int, str)
     def _on_progress(self, pct: int, text: str):
@@ -428,7 +419,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(text)
 
     def _end_loading(self):
-        QApplication.restoreOverrideCursor()
+        self._loading = False
         self.progress.setVisible(False)
         self.a_open.setEnabled(True)
         self.a_reload.setEnabled(True)
@@ -439,7 +430,9 @@ class MainWindow(QMainWindow):
         log.info("Geladen: %d Bauteile, %d Dreiecke in %.1f s", model.parts, model.triangles, seconds)
         self.model = model
         self._load_time = seconds
+        log.info("Baue 3D-Darstellung auf …")
         self.part_map = self.viewport.set_model(model)
+        log.info("3D-Darstellung fertig, fülle Modellbaum")
         self._fill_tree(model.root)
         self.setWindowTitle(f"{os.path.basename(model.path)} – {APP_NAME}  v{VERSION}")
         tris = f"{model.triangles:,}".replace(",", ".")

@@ -1,5 +1,13 @@
 # Änderungen
 
+## 1.0.2
+- macOS: Programm hing beim Öffnen einer Datei (Fenster ohne Reaktion). Das Laden lief in einem
+  Hintergrund-Thread, der sich unter macOS mit der Oberfläche gegenseitig blockierte.
+  Das Laden läuft jetzt im Haupt-Thread; die Oberfläche wird zwischendurch aktualisiert
+  (Fortschrittsbalken), Benutzereingaben sind während des Ladens gesperrt.
+- Kein systemweiter Warte-Mauszeiger mehr während des Ladens
+- Ausführlicheres Protokoll der Ladeschritte (Lesen, Übertragen, Vernetzen, Darstellung)
+
 ## 1.0.1
 - macOS: Programm hing beim Start (Dock-Symbol und Menüleiste sichtbar, Fenster ohne Reaktion).
   Ursache: die 3D-Ansicht hat schon gerendert, bevor das Fenster existierte. Die 3D-Ansicht
