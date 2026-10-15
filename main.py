@@ -49,6 +49,19 @@ def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         return selftest(sys.argv[2])
 
+    # --smoketest <datei>: Oberfläche starten, Datei laden, danach selbst beenden (für CI)
+    smoke_file = None
+    if len(sys.argv) >= 3 and sys.argv[1] == "--smoketest":
+        smoke_file = os.path.abspath(sys.argv[2])
+        sys.argv = [sys.argv[0]]
+
+    from stepviewer.diagnostics import HangWatchdog, log_file, setup_logging
+
+    setup_logging()
+    import logging
+
+    log = logging.getLogger("stepviewer.main")
+
     # Windows: eigene Taskleisten-Gruppe und eigenes Icon
     if sys.platform == "win32":
         try:
@@ -83,7 +96,14 @@ def main() -> int:
                 return True
             return super().event(ev)
 
+    # VTK nutzt ein natives Unterfenster – Qt soll daneben keine weiteren erzeugen
+    QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings, True)
+    log.info("Qt wird gestartet")
     app = ViewerApp(sys.argv)
+    from PySide6.QtCore import QTimer
+
+    watchdog = HangWatchdog()
+    watchdog.start(QTimer)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     app.setApplicationVersion(VERSION)
@@ -98,16 +118,48 @@ def main() -> int:
             icon.addFile(p)
     app.setWindowIcon(icon)
 
+    log.info("Hauptfenster wird erstellt")
     win = MainWindow(icon)
     app.window = win
     win.show()
+    win.raise_()
+    win.activateWindow()
+    log.info("Hauptfenster angezeigt")
+
+    if smoke_file:
+        _start_smoketest(app, win, smoke_file, log, log_file())
 
     files = [a for a in sys.argv[1:] if os.path.isfile(a)] + app.pending
     if files:
-        from PySide6.QtCore import QTimer
+        win.open_file(os.path.abspath(files[0]))  # wird nach dem Start der 3D-Ansicht geladen
+    code = app.exec()
+    log.info("Programm beendet (Code %s)", code)
+    return code
 
-        QTimer.singleShot(200, lambda: win.open_file(os.path.abspath(files[0])))
-    return app.exec()
+
+def _start_smoketest(app, win, path, log, logpath):
+    """Prüft im Build, ob Fenster, 3D-Ansicht und Laden funktionieren."""
+    import time
+
+    from PySide6.QtCore import QTimer
+
+    start = time.monotonic()
+    win.open_file(path)
+
+    def check():
+        elapsed = time.monotonic() - start
+        if win.viewport._ready and win.model is not None:
+            log.info("SMOKETEST OK nach %.1f s", elapsed)
+            app.exit(0)
+        elif elapsed > 60:
+            log.error("SMOKETEST Zeitüberschreitung (3D bereit=%s, Modell=%s)",
+                      win.viewport._ready, win.model is not None)
+            app.exit(3)
+        else:
+            QTimer.singleShot(250, check)
+
+    QTimer.singleShot(250, check)
+    print(f"Smoketest läuft, Protokoll: {logpath}", flush=True)
 
 
 def _dark_palette(QPalette, QColor, Qt):  # noqa: N803

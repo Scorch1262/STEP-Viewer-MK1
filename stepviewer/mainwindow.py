@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
@@ -35,6 +36,7 @@ FILE_FILTER = (
     "BREP (*.brep *.brp);;STL (*.stl *.STL);;Alle Dateien (*)"
 )
 MAX_RECENT = 10
+log = logging.getLogger("stepviewer.main")
 ROLE_NODE = Qt.UserRole + 1
 
 
@@ -75,6 +77,7 @@ class MainWindow(QMainWindow):
         self._updating_tree = False
         self._load_time = 0.0
         self.sm_thread: spacemouse.SpaceMouseThread | None = None
+        self._pending_files: list[str] = []
 
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
         if icon is not None:
@@ -219,6 +222,7 @@ class MainWindow(QMainWindow):
 
         self.a_help = self._act("Bedienung", self._show_help, "F1")
         self.a_about = self._act(f"Über {APP_NAME}", self._show_about)
+        self.a_logs = self._act("Protokollordner öffnen", self._open_logs)
 
     def _build_menus(self):
         mb = self.menuBar()
@@ -269,6 +273,8 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&Hilfe")
         m.addAction(self.a_help)
+        m.addAction(self.a_logs)
+        m.addSeparator()
         m.addAction(self.a_about)
 
     def _build_toolbars(self):
@@ -361,8 +367,17 @@ class MainWindow(QMainWindow):
         super().showEvent(ev)
         if not getattr(self, "_vtk_started", False):
             self._vtk_started = True
-            self.viewport.initialize()
-            self.viewport.set_axes_visible(self.a_axes.isChecked())
+            # erst initialisieren, wenn das Fenster wirklich auf dem Bildschirm ist
+            QTimer.singleShot(150, self._init_viewport)
+
+    def _init_viewport(self):
+        log.info("Hauptfenster sichtbar – starte 3D-Ansicht")
+        self.viewport.set_axes_visible(self.a_axes.isChecked())
+        self.viewport.initialize()
+        self.viewport.render()
+        for path in self._pending_files:
+            self.open_file(path)
+        self._pending_files.clear()
 
     # --------------------------------------------------------------- Laden
     def open_dialog(self):
@@ -376,6 +391,10 @@ class MainWindow(QMainWindow):
             self.open_file(self.model.path)
 
     def open_file(self, path: str):
+        if not self.viewport._ready:
+            self._pending_files.append(path)
+            return
+        log.info("Öffne %s", path)
         if self._thread is not None and self._thread.isRunning():
             self.statusBar().showMessage("Es wird bereits eine Datei geladen …", 3000)
             return
@@ -417,6 +436,7 @@ class MainWindow(QMainWindow):
     @Slot(object, float)
     def _on_loaded(self, model: LoadedModel, seconds: float):
         self._end_loading()
+        log.info("Geladen: %d Bauteile, %d Dreiecke in %.1f s", model.parts, model.triangles, seconds)
         self.model = model
         self._load_time = seconds
         self.part_map = self.viewport.set_model(model)
@@ -431,6 +451,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_failed(self, message: str):
+        log.error("Laden fehlgeschlagen: %s", message)
         self._end_loading()
         self.status_label.setText("Laden fehlgeschlagen")
         QMessageBox.critical(self, APP_NAME, message)
@@ -752,6 +773,14 @@ class MainWindow(QMainWindow):
             "<p>Eigenständiger 3D-Viewer für STEP-, IGES-, BREP- und STL-Dateien.</p>"
             "<p>Geometrie: Open CASCADE (OCP) · Darstellung: VTK · Oberfläche: Qt (PySide6)</p>",
         )
+
+    def _open_logs(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        from .diagnostics import log_dir
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir()))
 
     # --------------------------------------------------------- Drag & Drop
     def dragEnterEvent(self, ev):  # noqa: N802

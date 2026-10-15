@@ -4,7 +4,7 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
 3Dconnexion-Treiber. Kein Browserprogramm, sondern ein eigenes Programmfenster
 (Qt + VTK, Geometrie über Open CASCADE).
 
-**Version:** siehe `stepviewer/__init__.py` (aktuell 1.0.0)
+**Version:** siehe `stepviewer/__init__.py` (aktuell 1.0.1)
 
 ## Funktionen
 

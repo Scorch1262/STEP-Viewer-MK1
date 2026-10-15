@@ -50,6 +50,17 @@ jobs:
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "Selbsttest fehlgeschlagen (Code $($p.ExitCode))" }
 
+      - name: Starttest Oberfläche (Fenster + 3D-Ansicht)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\STEP-Viewer-MK1\STEP-Viewer-MK1.exe" `
+               -ArgumentList '--smoketest', 'beispiele\Halter-Baugruppe.step' -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); Write-Host "::warning::Programm reagiert nach 90 s nicht" }
+          Write-Host "----- Protokoll -----"
+          Get-Content "$env:LOCALAPPDATA\STEP-Viewer-MK1\logs\stepviewer.log" -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { throw "Starttest fehlgeschlagen (Code $($p.ExitCode))" }
+
       - name: Portable ZIP packen
         shell: pwsh
         run: |
@@ -102,6 +113,26 @@ jobs:
       - name: Selbsttest (Beispieldatei laden)
         run: |
           "dist/STEP-Viewer-MK1.app/Contents/MacOS/STEP-Viewer-MK1" --selftest beispiele/Halter-Baugruppe.step
+
+      - name: Starttest Oberfläche (Fenster + 3D-Ansicht)
+        # Mac-Runner haben eingeschränktes OpenGL – ein Fehlschlag stoppt den Build nicht,
+        # das Protokoll zeigt aber, ob und wo das Programm hängt.
+        continue-on-error: true
+        run: |
+          APP="dist/STEP-Viewer-MK1.app/Contents/MacOS/STEP-Viewer-MK1"
+          "$APP" --smoketest beispiele/Halter-Baugruppe.step &
+          PID=$!
+          for i in $(seq 1 90); do sleep 1; kill -0 $PID 2>/dev/null || break; done
+          if kill -0 $PID 2>/dev/null; then
+            echo "::warning::Programm reagiert nach 90 s nicht – wird beendet"
+            kill -9 $PID; CODE=124
+          else
+            wait $PID; CODE=$?
+          fi
+          echo "----- Protokoll -----"
+          cat ~/Library/Logs/STEP-Viewer-MK1/stepviewer.log || true
+          echo "Exit-Code: $CODE"
+          exit $CODE
 
       - name: Signieren (ad hoc) und DMG/ZIP packen
         run: |

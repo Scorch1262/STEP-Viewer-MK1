@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Optional
 
@@ -9,6 +10,8 @@ from typing import Optional
 import vtkmodules.qt
 
 vtkmodules.qt.PyQtImpl = "PySide6"
+
+log = logging.getLogger("stepviewer.viewer")
 
 # Diese Module müssen importiert werden, damit Rendering und Text funktionieren
 import vtkmodules.vtkInteractionStyle  # noqa: F401,E402
@@ -108,6 +111,10 @@ class Viewport(QVTKRenderWindowInteractor):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Wichtig für macOS: vor dem Anzeigen des Fensters darf VTK nicht rendern,
+        # sonst hängt das Programm beim Start (Cocoa-Fenster existiert noch nicht).
+        self._ready = False
+        self._Iren.EnableRenderOff()  # auch Mausaktionen rendern erst nach dem Start
         self.setFocusPolicy(Qt.StrongFocus)
         self.renderer = vtkRenderer()
         self.renderer.GradientBackgroundOn()
@@ -138,6 +145,7 @@ class Viewport(QVTKRenderWindowInteractor):
         self.axes_widget.SetOrientationMarker(self.axes)
         self.axes_widget.SetInteractor(self.GetRenderWindow().GetInteractor())
         self.axes_widget.SetViewport(0.0, 0.0, 0.16, 0.22)
+        self._axes_visible = True
 
         # Messen
         self.measure_mode = False
@@ -149,10 +157,33 @@ class Viewport(QVTKRenderWindowInteractor):
 
     # -- Lebenszyklus --------------------------------------------------------
     def initialize(self):
+        """Wird aufgerufen, sobald das Hauptfenster sichtbar ist."""
+        if self._ready:
+            return
+        log.info("VTK wird initialisiert …")
         self.Initialize()
-        self.axes_widget.SetEnabled(1)
-        self.axes_widget.InteractiveOff()
-        self.Start()
+        self._Iren.EnableRenderOn()
+        self._ready = True
+        self._enable_axes()
+        log.info("VTK initialisiert")
+
+    def paintEvent(self, ev):  # noqa: N802
+        if self._ready:
+            super().paintEvent(ev)
+
+    def Finalize(self):  # noqa: N802
+        if not self._ready:
+            return
+        try:
+            self.GetRenderWindow().Finalize()
+        except Exception:  # noqa: BLE001
+            log.exception("Finalize fehlgeschlagen")
+
+    def _enable_axes(self):
+        if self._axes_visible:
+            self.axes_widget.SetEnabled(1)
+            self.axes_widget.InteractiveOff()
+        self.render()
 
     # -- Modell --------------------------------------------------------------
     def clear(self):
@@ -288,6 +319,9 @@ class Viewport(QVTKRenderWindowInteractor):
         self.render()
 
     def set_axes_visible(self, on: bool):
+        self._axes_visible = on
+        if not self._ready:
+            return
         self.axes_widget.SetEnabled(1 if on else 0)
         if on:
             self.axes_widget.InteractiveOff()
@@ -495,10 +529,13 @@ class Viewport(QVTKRenderWindowInteractor):
         self.render()
 
     def render(self):
+        """Neuzeichnen – erst wenn das Fenster bereit ist (wichtig für macOS)."""
+        if not self._ready:
+            return
         try:
             self.render_window.Render()
         except Exception:  # noqa: BLE001
-            pass
+            log.exception("Rendern fehlgeschlagen")
 
     def keyPressEvent(self, ev):  # noqa: N802
         if ev.key() == Qt.Key_Escape and self.measure_mode:
