@@ -1,5 +1,7 @@
 # STEP-Viewer-MK1
 
+![STEP-Viewer-MK1 mit geöffneter Getriebe-Baugruppe](docs/readme-banner.png)
+
 Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus dem
 3Dconnexion-Treiber. Kein Browserprogramm, sondern ein eigenes Programmfenster
 (Qt + VTK, Geometrie über Open CASCADE).
@@ -21,6 +23,14 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
 - Drag & Drop, „Zuletzt geöffnet“, Öffnen per Doppelklick/„Öffnen mit“
 - 3Dconnexion SpaceMouse (experimentell, direkt per HID)
 - Gleiche Bauteile werden nur einmal vernetzt (schnell bei Normteilen)
+
+## Beispieldateien
+
+Im Ordner `beispiele/` liegen zwei STEP-Dateien zum Ausprobieren:
+
+- `Getriebe-Baugruppe.step` – Getriebe mit Grundplatte, Lagerböcken, Welle, Zahnrädern, Motor und
+  Schrauben in mehreren Unterbaugruppen (auf dem Bild oben zu sehen)
+- `Halter-Baugruppe.step` – kleiner Winkel mit drei Schrauben
 
 ## Bedienung
 
