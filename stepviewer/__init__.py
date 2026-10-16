@@ -1,5 +1,5 @@
 """STEP-Viewer-MK1 – eigenständiger 3D-Viewer für STEP/IGES/BREP/STL-Dateien."""
 
 APP_NAME = "STEP-Viewer-MK1"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 ORG_NAME = "Scorch1262"

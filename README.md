@@ -6,7 +6,7 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
 3Dconnexion-Treiber. Kein Browserprogramm, sondern ein eigenes Programmfenster
 (Qt + VTK, Geometrie über Open CASCADE).
 
-**Version:** siehe `stepviewer/__init__.py` (aktuell 1.1.0)
+**Version:** siehe `stepviewer/__init__.py` (aktuell 1.2.0)
 
 ## Funktionen
 
@@ -17,7 +17,9 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
 - Darstellungen: Schattiert + Kanten, Schattiert, Drahtgitter, Transparent
 - Standardansichten (Iso, Vorne, Hinten, Links, Rechts, Oben, Unten), Einpassen,
   Parallel-/Perspektivprojektion, Achsenkreuz, drei Hintergründe
-- Messen: Abstand zwischen zwei Punkten (mit ΔX/ΔY/ΔZ)
+- Messen: Abstand zwischen zwei Punkten (mit ΔX/ΔY/ΔZ); beim Ausschalten verschwinden die Bemaßungen
+- Schnittansicht: Ebene per X/Y/Z, Blickrichtung, Schieberegler, mm-Wert oder frei mit der Maus
+  platzieren und drehen, rote Schnittflächen
 - Info-Bereich: Abmessungen, Bauteilanzahl, Dreiecke, Abmessungen der Auswahl
 - Bild der Ansicht als PNG speichern
 - Drag & Drop, „Zuletzt geöffnet“, Öffnen per Doppelklick/„Öffnen mit“
@@ -44,7 +46,8 @@ Im Ordner `beispiele/` liegen zwei STEP-Dateien zum Ausprobieren:
 | Iso / Vorne / Rechts / Oben | 0 / 1 / 3 / 7 (mit Strg: Gegenseite) |
 | Darstellung | Strg+E, Strg+R, Strg+W, T (transparent), P (Perspektive) |
 | Ausblenden / Nur Auswahl / Alle | H / I / Strg+Shift+A |
-| Messen | M (Esc beendet) |
+| Messen | M (Esc beendet, Bemaßungen verschwinden) |
+| Schnitt | S – Leiste darunter; im 3D-Fenster Ebene ziehen = verschieben, Pfeil ziehen = drehen |
 | Neu laden | F5 |
 
 ## Build über GitHub Actions

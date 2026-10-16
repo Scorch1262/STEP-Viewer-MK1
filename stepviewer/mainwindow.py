@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 
@@ -10,13 +11,16 @@ from PySide6.QtCore import QEventLoop, QSettings, Qt, QTimer, Slot
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
     QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
     QProgressBar,
+    QSlider,
     QSplitter,
     QToolBar,
     QTreeWidget,
@@ -61,6 +65,7 @@ class MainWindow(QMainWindow):
         self._sm_timer.timeout.connect(self._sm_tick)
         self._sm_last = 0.0
         self._sm_moving = False
+        self._sm_smooth = [0.0] * 6
         self._pending_files: list[str] = []
 
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
@@ -184,6 +189,8 @@ class MainWindow(QMainWindow):
         self.a_measure = self._act("Messen", self._toggle_measure, "M", checkable=True,
                                    tip="Abstand zwischen zwei Punkten messen (M)")
         self.a_clear_measure = self._act("Messungen löschen", self.viewport.clear_measurements)
+        self.a_section = self._act("Schnitt", self._toggle_section, "S", checkable=True,
+                                   tip="Schnittansicht ein-/ausschalten (S) – Ebene frei verschiebbar und drehbar")
         self.a_show_all = self._act("Alle anzeigen", self._show_all, "Ctrl+Shift+A")
         self.a_hide_sel = self._act("Auswahl ausblenden", self._hide_selection, "H")
         self.a_isolate = self._act("Nur Auswahl anzeigen", self._isolate_selection, "I")
@@ -253,6 +260,7 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("&Werkzeuge")
         m.addAction(self.a_measure)
         m.addAction(self.a_clear_measure)
+        m.addAction(self.a_section)
         m.addSeparator()
         m.addAction(self.a_spacemouse)
         qm = m.addMenu("Darstellungsqualität")
@@ -290,7 +298,76 @@ class MainWindow(QMainWindow):
         tb.addAction(self.a_persp)
         tb.addSeparator()
         tb.addAction(self.a_measure)
+        tb.addAction(self.a_section)
         self.addToolBar(tb)
+        self._build_section_bar()
+
+    def _build_section_bar(self):
+        """Zweite Leiste mit allen Einstellungen zur Schnittebene (nur bei aktivem Schnitt)."""
+        self.addToolBarBreak()
+        tb = QToolBar("Schnitt", self)
+        tb.setObjectName("tbSection")
+        tb.setMovable(False)
+        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        lbl = QLabel("  Schnittebene:  ")
+        lbl.setStyleSheet("color:#ff8c1a; font-weight:600;")
+        tb.addWidget(lbl)
+        self.sec_axis = {}
+        group = QActionGroup(self)
+        for key, text, n in (("x", "X", (1, 0, 0)), ("y", "Y", (0, 1, 0)), ("z", "Z", (0, 0, 1))):
+            a = QAction(text, self)
+            a.setCheckable(True)
+            a.setToolTip(f"Schnittebene senkrecht zur {text}-Achse")
+            a.triggered.connect(lambda _=False, n=n: self._section_axis(n))
+            group.addAction(a)
+            tb.addAction(a)
+            self.sec_axis[key] = a
+        self.sec_free = QAction("Frei", self)
+        self.sec_free.setCheckable(True)
+        self.sec_free.setEnabled(False)
+        self.sec_free.setToolTip("Ebene wurde frei gedreht (Griff oder „An Ansicht“)")
+        group.addAction(self.sec_free)
+        tb.addAction(self.sec_free)
+        a = tb.addAction("An Ansicht", self._section_to_view)
+        a.setToolTip("Ebene senkrecht zur aktuellen Blickrichtung stellen")
+        a = tb.addAction("Umkehren", self._section_flip)
+        a.setToolTip("Die andere Seite des Modells anzeigen")
+        a = tb.addAction("Mitte", self._section_center)
+        a.setToolTip("Ebene in die Modellmitte setzen")
+        tb.addSeparator()
+        self.sec_slider = QSlider(Qt.Horizontal)
+        self.sec_slider.setRange(0, 1000)
+        self.sec_slider.setMinimumWidth(240)
+        self.sec_slider.setToolTip("Schnittebene verschieben")
+        self.sec_slider.valueChanged.connect(self._section_slider)
+        self.sec_slider.sliderPressed.connect(self.viewport.begin_interaction)
+        self.sec_slider.sliderReleased.connect(lambda: self.viewport.end_interaction(150))
+        tb.addWidget(self.sec_slider)
+        self.sec_spin = QDoubleSpinBox()
+        self.sec_spin.setDecimals(2)
+        self.sec_spin.setSuffix(" mm")
+        self.sec_spin.setKeyboardTracking(False)
+        self.sec_spin.setMinimumWidth(120)
+        self.sec_spin.setToolTip("Lage der Ebene entlang ihrer Normalen (bei X/Y/Z = Koordinate)")
+        self.sec_spin.valueChanged.connect(self._section_spin)
+        tb.addWidget(self.sec_spin)
+        tb.addSeparator()
+        self.sec_handle = QCheckBox("Ebene ziehen")
+        self.sec_handle.setChecked(True)
+        self.sec_handle.setToolTip("Ebene im 3D-Fenster anzeigen: Fläche ziehen = verschieben, "
+                                   "Pfeil ziehen = drehen")
+        self.sec_handle.toggled.connect(self._section_handle)
+        tb.addWidget(self.sec_handle)
+        self.sec_caps = QCheckBox("Schnittfläche färben")
+        self.sec_caps.setChecked(True)
+        self.sec_caps.toggled.connect(self._section_caps)
+        tb.addWidget(self.sec_caps)
+        tb.setVisible(False)
+        self.addToolBar(tb)
+        self.section_bar = tb
+        self._sec_range = (0.0, 1.0)
+        self._sec_syncing = False
+        self.viewport.sectionChanged.connect(self._sync_section_ui)
 
     def _build_statusbar(self):
         sb = self.statusBar()
@@ -451,6 +528,7 @@ class MainWindow(QMainWindow):
         self.part_map = self.viewport.set_model(model)
         log.info("3D-Darstellung fertig, fülle Modellbaum")
         self._fill_tree(model.root)
+        self._sync_section_ui()
         self.setWindowTitle(f"{os.path.basename(model.path)} – {APP_NAME}  v{VERSION}")
         tris = f"{model.triangles:,}".replace(",", ".")
         secs = f"{seconds:.1f}".replace(".", ",")
@@ -694,6 +772,79 @@ class MainWindow(QMainWindow):
         if self.model is not None:
             self.statusBar().showMessage("Neue Qualität gilt ab dem nächsten Laden (F5)", 4000)
 
+    # ------------------------------------------------------------- Schnitt
+    def _toggle_section(self, on):
+        self.section_bar.setVisible(on)
+        self.viewport.set_section_enabled(on)
+        self._sync_section_ui()
+        if on:
+            self.status_label.setText("Schnitt: Ebene im 3D-Fenster ziehen oder über die Leiste einstellen")
+
+    def _section_axis(self, n):
+        self.viewport.set_section_normal(n)
+        self._sync_section_ui()
+
+    def _section_to_view(self):
+        self.viewport.align_section_to_view()
+        self._sync_section_ui()
+
+    def _section_flip(self):
+        self.viewport.flip_section()
+        self._sync_section_ui()
+
+    def _section_center(self):
+        self.viewport._reset_section_origin()
+        self.viewport._apply_section()
+        self._sync_section_ui()
+
+    def _section_handle(self, on):
+        self.viewport.set_section_handle(on)
+
+    def _section_caps(self, on):
+        self.viewport.set_section_caps(on)
+
+    def _section_slider(self, value):
+        if self._sec_syncing:
+            return
+        lo, hi = self._sec_range
+        d = lo + (hi - lo) * value / 1000.0
+        self.viewport.set_section_offset(d)
+        self._sec_syncing = True
+        self.sec_spin.setValue(d)
+        self._sec_syncing = False
+
+    def _section_spin(self, value):
+        if self._sec_syncing:
+            return
+        self.viewport.set_section_offset(value)
+        self._sync_section_ui()
+
+    def _sync_section_ui(self):
+        """Leiste an die aktuelle Lage der Ebene anpassen (ohne Rückkopplung)."""
+        if not self.viewport.section_on:
+            return
+        self._sec_syncing = True
+        try:
+            n = self.viewport.section_normal()
+            axis = None
+            for i, key in enumerate("xyz"):
+                if abs(abs(n[i]) - 1.0) < 1e-6:
+                    axis = key
+            if axis:
+                self.sec_axis[axis].setChecked(True)
+            else:
+                self.sec_free.setChecked(True)
+            lo, hi = self.viewport.section_range()
+            self._sec_range = (lo, hi)
+            d = self.viewport.section_offset()
+            self.sec_spin.setRange(min(lo, d) - 1e6, max(hi, d) + 1e6)
+            self.sec_spin.setSingleStep(max((hi - lo) / 100.0, 0.01))
+            self.sec_spin.setValue(d)
+            if hi > lo:
+                self.sec_slider.setValue(int(round(max(0.0, min(1.0, (d - lo) / (hi - lo))) * 1000)))
+        finally:
+            self._sec_syncing = False
+
     def _toggle_measure(self, on):
         self.viewport.set_measure_mode(on)
 
@@ -747,16 +898,22 @@ class MainWindow(QMainWindow):
         """Einmal pro Bild den aktuellen SpaceMouse-Zustand anwenden."""
         if self.sm_thread is None:
             return
-        state = self.sm_thread.poll()
+        target = self.sm_thread.poll()
         now = time.perf_counter()
-        dt = now - self._sm_last
+        dt = min(now - self._sm_last, 0.05)
         self._sm_last = now
-        if any(state):
+        # Weiche Übergänge: Werte mit kurzer Zeitkonstante glätten (≈ 60 ms),
+        # damit einzelne Ausreißer oder Messlücken nicht als Sprung sichtbar werden
+        a = 1.0 - math.exp(-dt / 0.06)
+        s = [p + (q - p) * a for p, q in zip(self._sm_smooth, target)]
+        if not any(target):
+            s = [v if abs(v) > 0.01 else 0.0 for v in s]
+        self._sm_smooth = s
+        if any(s):
             if not self._sm_moving:
                 self._sm_moving = True
                 self.viewport.begin_interaction()
-                dt = 1 / 60
-            self.viewport.apply_spacemouse(*state, dt=dt)
+            self.viewport.apply_spacemouse(*s, dt=max(dt, 1 / 120))
         elif self._sm_moving:
             self._sm_moving = False
             self.viewport.end_interaction(250)
@@ -786,7 +943,9 @@ class MainWindow(QMainWindow):
             "0 Iso · 1 Vorne · 3 Rechts · 7 Oben (mit Strg: Gegenseite)<br>"
             "Strg+E / Strg+R / Strg+W Darstellung · T Transparent · P Perspektive<br>"
             "H Ausblenden · I Nur Auswahl · Strg+Shift+A Alle anzeigen<br>"
-            "M Messen · Esc Messen beenden · F5 Neu laden<br><br>"
+            "M Messen (beim Ausschalten verschwinden die Bemaßungen) · Esc Messen beenden · F5 Neu laden<br>"
+            "S Schnitt: Leiste darunter mit X/Y/Z, „An Ansicht“, Umkehren, Schieberegler und mm-Wert.<br>"
+            "&nbsp;&nbsp;Im 3D-Fenster: Fläche der Ebene ziehen = verschieben, Pfeil ziehen = drehen<br><br>"
             "<b>SpaceMouse</b><br>"
             "Unter Werkzeuge aktivieren. Linke Taste: Einpassen, rechte Taste: Iso.<br>"
             "Falls das Gerät vom 3Dconnexion-Treiber belegt ist, kann der Viewer es nicht lesen.",

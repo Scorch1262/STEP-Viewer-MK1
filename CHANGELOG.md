@@ -1,5 +1,20 @@
 # Änderungen
 
+## 1.2.0 – Schnittansicht
+- Neu: Schnittansicht über den Schalter „Schnitt“ in der Leiste (Taste S). Darunter erscheint eine
+  eigene Schnitt-Leiste:
+  - X / Y / Z: Ebene senkrecht zu einer Achse, „An Ansicht“: senkrecht zur Blickrichtung
+  - „Umkehren“ zeigt die andere Modellhälfte, „Mitte“ setzt die Ebene in die Modellmitte
+  - Schieberegler und mm-Eingabe für die genaue Lage der Ebene
+  - „Ebene ziehen“: Ebene im 3D-Fenster frei platzieren – Fläche ziehen verschiebt sie,
+    Pfeil ziehen dreht sie in jede beliebige Richtung („Frei“)
+  - „Schnittfläche färben“: geschnittene Körper erscheinen massiv mit roter Schnittfläche
+  - Auswahl und Messen berücksichtigen den Schnitt (nur sichtbare Teile werden getroffen)
+- SpaceMouse: kein Springen mehr beim Bewegen. Die Kamera wird jetzt als Ganzes um ihre eigenen Achsen
+  gedreht; vorher klappte die Ansicht beim Kippen über 90° schlagartig um (bis zu 38° in einem Bild).
+  Zusätzlich werden die Werte geglättet und kurze Funkpausen unterbrechen die Bewegung nicht mehr.
+- Messen: Beim Ausschalten von „Messen“ (oder Esc) verschwinden alle Bemaßungen wieder
+
 ## 1.1.0 – Leistung bei großen Baugruppen
 - Alle Bauteile werden gebündelt in nur noch zwei Zeichenobjekten dargestellt (Flächen und Kanten,
   vtkCompositePolyDataMapper) statt zwei Objekten pro Bauteil. Bei 5000 Teilen entfallen damit

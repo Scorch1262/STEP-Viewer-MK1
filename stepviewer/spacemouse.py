@@ -137,8 +137,10 @@ class SpaceMouseThread(QThread):
                             if pressed & (1 << bit):
                                 self.button.emit(bit)
                     self._set(t, r)
-                elif any(t + r) and now - last_report > 0.2:
-                    # Gerät meldet beim Loslassen nicht immer 0 – Werte zurücksetzen
+                elif any(t + r) and now - last_report > 1.0:
+                    # Sicherheitsnetz: bleibt das Gerät länger stumm (z. B. Funkabbruch),
+                    # Bewegung stoppen. Kurze Lücken sind normal und dürfen die
+                    # Bewegung nicht unterbrechen – das führte zu Rucklern.
                     t = [0.0, 0.0, 0.0]
                     r = [0.0, 0.0, 0.0]
                     self._set(t, r)

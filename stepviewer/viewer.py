@@ -36,13 +36,17 @@ from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QWidget  # noqa: E402
 from vtkmodules.vtkCommonCore import vtkUnsignedCharArray  # noqa: E402
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor  # noqa: E402
-from vtkmodules.vtkCommonDataModel import vtkMultiBlockDataSet, vtkPolyData  # noqa: E402
+from vtkmodules.vtkCommonDataModel import vtkMultiBlockDataSet, vtkPlane, vtkPolyData  # noqa: E402
 from vtkmodules.vtkCommonMath import vtkMatrix4x4  # noqa: E402
 from vtkmodules.vtkCommonTransforms import vtkTransform  # noqa: E402
 from vtkmodules.vtkFiltersGeneral import vtkTransformPolyDataFilter  # noqa: E402
 from vtkmodules.vtkFiltersSources import vtkLineSource, vtkSphereSource  # noqa: E402
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera  # noqa: E402
-from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget  # noqa: E402
+from vtkmodules.vtkInteractionWidgets import (  # noqa: E402
+    vtkImplicitPlaneRepresentation,
+    vtkImplicitPlaneWidget2,
+    vtkOrientationMarkerWidget,
+)
 from vtkmodules.vtkIOImage import vtkPNGWriter  # noqa: E402
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor  # noqa: E402
 from vtkmodules.vtkRenderingCore import vtkLightKit  # noqa: E402
@@ -63,6 +67,7 @@ from .loader import LoadedModel, ModelNode  # noqa: E402
 HIGHLIGHT = (1.0, 0.55, 0.10)
 EDGE_COLOR = (0.08, 0.08, 0.10)
 MEASURE_COLOR = (1.0, 0.85, 0.15)
+CUT_COLOR = (0.86, 0.22, 0.18)  # Farbe der Schnittflächen
 
 BACKGROUNDS = {
     "dunkel": ((0.12, 0.13, 0.16), (0.30, 0.33, 0.39)),
@@ -159,6 +164,7 @@ class Viewport(QVTKRenderWindowInteractor):
     partPicked = Signal(object)  # ModelNode oder None
     measured = Signal(float, tuple)  # Abstand, (dx, dy, dz)
     measureStatus = Signal(str)
+    sectionChanged = Signal()  # Lage der Schnittebene geändert (Griff gezogen)
 
     _suppress_winid = False
 
@@ -183,6 +189,7 @@ class Viewport(QVTKRenderWindowInteractor):
         self._failed = False
         self._Iren.EnableRenderOff()  # auch Mausaktionen rendern erst nach dem Start
         self._render_scale = None
+        self._render_pending = False
         if OFFSCREEN:
             # Renderwünsche des Interaktors (Drehen, Zoomen …) als Qt-Neuzeichnen ausführen
             self._Iren.AddObserver("RenderEvent", lambda *a: self.update())
@@ -236,6 +243,17 @@ class Viewport(QVTKRenderWindowInteractor):
         self.axes_widget.SetInteractor(self.GetRenderWindow().GetInteractor())
         self.axes_widget.SetViewport(0.0, 0.0, 0.16, 0.22)
         self._axes_visible = True
+
+        # Schnitt
+        self.section_on = False
+        self.section_caps = True
+        self.section_handle = True
+        self.section_plane = vtkPlane()
+        self.section_plane.SetNormal(1, 0, 0)
+        self.cap_actor: Optional[vtkActor] = None
+        self.cap_attrs = vtkCompositeDataDisplayAttributes()
+        self.section_widget: Optional[vtkImplicitPlaneWidget2] = None
+        self.section_rep: Optional[vtkImplicitPlaneRepresentation] = None
 
         # Messen
         self.measure_mode = False
@@ -357,10 +375,11 @@ class Viewport(QVTKRenderWindowInteractor):
 
     # -- Modell --------------------------------------------------------------
     def clear(self):
-        for a in (self.faces_actor, self.edges_actor):
+        for a in (self.faces_actor, self.edges_actor, self.cap_actor):
             if a is not None:
                 self.renderer.RemoveActor(a)
-        self.faces_actor = self.edges_actor = None
+        self.faces_actor = self.edges_actor = self.cap_actor = None
+        self.cap_attrs = vtkCompositeDataDisplayAttributes()
         self.parts.clear()
         self._part_by_flat.clear()
         self._edge_cells = 0
@@ -433,13 +452,35 @@ class Viewport(QVTKRenderWindowInteractor):
         ea.GetProperty().LightingOff()
         ea.PickableOff()
 
-        self.faces_actor, self.edges_actor = fa, ea
+        # Schnittflächen: dieselben Flächen noch einmal, aber nur die Innenseiten
+        # (Vorderseiten ausgeblendet) in Schnittfarbe. Bei einem Schnitt blickt man
+        # in die Körper hinein – die Innenseiten wirken wie massive Schnittflächen.
+        cm = vtkCompositePolyDataMapper()
+        cm.SetInputDataObject(faces_mb)
+        cm.SetCompositeDataDisplayAttributes(self.cap_attrs)
+        cm.ScalarVisibilityOff()
+        ca = vtkActor()
+        ca.SetMapper(cm)
+        cp = ca.GetProperty()
+        cp.SetColor(*CUT_COLOR)
+        cp.SetAmbient(0.55)
+        cp.SetDiffuse(0.45)
+        cp.SetSpecular(0.0)
+        cp.FrontfaceCullingOn()
+        ca.PickableOff()
+        ca.SetVisibility(False)
+
+        self.faces_actor, self.edges_actor, self.cap_actor = fa, ea, ca
         self.renderer.AddActor(fa)
         self.renderer.AddActor(ea)
+        self.renderer.AddActor(ca)
         for p in self.parts:
             self._style_part(p)
         self._apply_display()
         self.set_view("iso", fit=True)
+        if self.section_on:
+            self._reset_section_origin()
+            self._apply_section()
         log.info("Darstellung: %d Bauteile in 2 Zeichenobjekten", len(self.parts))
         return mapping
 
@@ -464,6 +505,9 @@ class Viewport(QVTKRenderWindowInteractor):
         self.faces_actor.SetPickable(show_faces)
         self.edges_actor.SetVisibility(show_edges and not self._interacting_hidden_edges)
         self.faces_actor.GetProperty().SetOpacity(0.35 if self.transparent else 1.0)
+        if self.cap_actor is not None:
+            self.cap_actor.SetVisibility(self.section_on and self.section_caps and show_faces)
+            self.cap_actor.GetProperty().SetOpacity(0.35 if self.transparent else 1.0)
         if show_faces:
             ec = EDGE_COLOR
         else:
@@ -474,6 +518,7 @@ class Viewport(QVTKRenderWindowInteractor):
         fa, ea = self.face_attrs, self.edge_attrs
         fa.SetBlockVisibility(p.faces, p.visible)
         fa.SetBlockPickability(p.faces, p.visible)
+        self.cap_attrs.SetBlockVisibility(p.faces, p.visible)
         ea.SetBlockVisibility(p.edges, p.visible)
         if p.selected:
             fa.SetBlockColor(p.faces, HIGHLIGHT)
@@ -488,9 +533,11 @@ class Viewport(QVTKRenderWindowInteractor):
     def _attrs_changed(self):
         self.face_attrs.Modified()
         self.edge_attrs.Modified()
+        self.cap_attrs.Modified()
         if self.faces_actor is not None:
             self.faces_actor.GetMapper().Modified()
             self.edges_actor.GetMapper().Modified()
+            self.cap_actor.GetMapper().Modified()
 
     def set_background(self, name: str):
         self.background = name
@@ -546,6 +593,141 @@ class Viewport(QVTKRenderWindowInteractor):
         if changed:
             self._attrs_changed()
         self.render()
+
+    # -- Schnitt -------------------------------------------------------------
+    def set_section_enabled(self, on: bool):
+        if on == self.section_on:
+            return
+        self.section_on = on
+        if on:
+            # Achse wählen, die am ehesten von vorne in das Modell schaut
+            d = self.camera.GetDirectionOfProjection()
+            i = max(range(3), key=lambda k: abs(d[k]))
+            n = [0.0, 0.0, 0.0]
+            n[i] = 1.0 if d[i] >= 0 else -1.0
+            self.section_plane.SetNormal(*n)
+            self._reset_section_origin()
+        self._apply_section()
+        log.info("Schnitt %s", "an" if on else "aus")
+
+    def _model_center(self):
+        b = self.visible_bounds() or (self.model.bounds if self.model else (0, 1, 0, 1, 0, 1))
+        return ((b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2)
+
+    def _reset_section_origin(self):
+        self.section_plane.SetOrigin(*self._model_center())
+
+    def _apply_section(self):
+        if self.faces_actor is None:
+            self._update_section_widget()
+            return
+        mappers = (self.faces_actor.GetMapper(), self.edges_actor.GetMapper(), self.cap_actor.GetMapper())
+        for m in mappers:
+            m.RemoveAllClippingPlanes()
+            if self.section_on:
+                m.AddClippingPlane(self.section_plane)
+        # Bei aktivem Schnitt nur Außenseiten zeichnen, Innenseiten übernimmt die Schnittfarbe
+        self.faces_actor.GetProperty().SetBackfaceCulling(self.section_on and self.section_caps)
+        self._apply_display()
+        self._update_section_widget()
+        self.render()
+
+    def set_section_caps(self, on: bool):
+        self.section_caps = on
+        self._apply_section()
+
+    def set_section_handle(self, on: bool):
+        self.section_handle = on
+        self._update_section_widget()
+        self.render()
+
+    def section_normal(self) -> tuple:
+        return tuple(self.section_plane.GetNormal())
+
+    def section_offset(self) -> float:
+        n = self.section_plane.GetNormal()
+        o = self.section_plane.GetOrigin()
+        return sum(n[i] * o[i] for i in range(3))
+
+    def section_range(self) -> tuple:
+        """Kleinster/größter Abstand der Modellecken entlang der Schnittnormale."""
+        b = self.visible_bounds() or (self.model.bounds if self.model else (0, 1, 0, 1, 0, 1))
+        n = self.section_plane.GetNormal()
+        vals = [n[0] * x + n[1] * y + n[2] * z for x in b[0:2] for y in b[2:4] for z in b[4:6]]
+        lo, hi = min(vals), max(vals)
+        pad = (hi - lo) * 0.001 or 0.001
+        return lo + pad, hi - pad
+
+    def set_section_normal(self, n, reset_origin: bool = True):
+        length = math.sqrt(sum(v * v for v in n)) or 1.0
+        self.section_plane.SetNormal(*(v / length for v in n))
+        if reset_origin:
+            self._reset_section_origin()
+        self._apply_section()
+
+    def set_section_offset(self, d: float):
+        n = self.section_plane.GetNormal()
+        o = self.section_plane.GetOrigin()
+        cur = sum(n[i] * o[i] for i in range(3))
+        self.section_plane.SetOrigin(*(o[i] + (d - cur) * n[i] for i in range(3)))
+        self._update_section_widget()
+        self.request_render()
+
+    def flip_section(self):
+        n = self.section_plane.GetNormal()
+        self.section_plane.SetNormal(-n[0], -n[1], -n[2])
+        self._apply_section()
+
+    def align_section_to_view(self):
+        self.set_section_normal(self.camera.GetDirectionOfProjection(), reset_origin=False)
+
+    def _ensure_section_widget(self):
+        if self.section_widget is not None or not self._ready:
+            return
+        rep = vtkImplicitPlaneRepresentation()
+        rep.SetPlaceFactor(1.15)
+        rep.OutlineTranslationOff()
+        rep.ScaleEnabledOff()
+        rep.SetConstrainToWidgetBounds(False)
+        rep.OutsideBoundsOn()
+        rep.SetDrawOutline(False)
+        rep.SetTubing(True)
+        rep.GetPlaneProperty().SetColor(1.0, 0.55, 0.10)
+        rep.GetPlaneProperty().SetOpacity(0.06)
+        rep.GetSelectedPlaneProperty().SetColor(1.0, 0.55, 0.10)
+        rep.GetSelectedPlaneProperty().SetOpacity(0.15)
+        rep.GetNormalProperty().SetColor(1.0, 0.55, 0.10)
+        rep.GetNormalProperty().SetLineWidth(2.0)
+        rep.SetEdgeColor(1.0, 0.55, 0.10)
+        rep.GetEdgesProperty().SetLineWidth(1.5)
+        w = vtkImplicitPlaneWidget2()
+        w.SetInteractor(self._Iren)
+        w.SetRepresentation(rep)
+        w.AddObserver("StartInteractionEvent", lambda *a: self.begin_interaction())
+        w.AddObserver("InteractionEvent", self._on_section_widget)
+        w.AddObserver("EndInteractionEvent", lambda *a: self.end_interaction(150))
+        self.section_rep, self.section_widget = rep, w
+
+    def _on_section_widget(self, *args):
+        self.section_rep.GetPlane(self.section_plane)
+        self.sectionChanged.emit()
+        self.render()
+
+    def _update_section_widget(self):
+        show = self.section_on and self.section_handle and self.faces_actor is not None
+        if show:
+            self._ensure_section_widget()
+        if self.section_widget is None:
+            return
+        if show:
+            b = self.visible_bounds() or self.model.bounds
+            self.section_rep.PlaceWidget(list(b))
+            self.section_rep.SetOrigin(*self.section_plane.GetOrigin())
+            self.section_rep.SetNormal(*self.section_plane.GetNormal())
+            if not self.section_widget.GetEnabled():
+                self.section_widget.On()
+        elif self.section_widget.GetEnabled():
+            self.section_widget.Off()
 
     # -- Kamera --------------------------------------------------------------
     def visible_bounds(self, parts: Optional[list] = None):
@@ -604,7 +786,7 @@ class Viewport(QVTKRenderWindowInteractor):
         gleich, egal wie schnell gezeichnet wird.
         """
         cam = self.camera
-        dt = max(0.004, min(dt, 0.1))
+        dt = max(0.004, min(dt, 0.05))
         b = self.visible_bounds() or (0, 1, 0, 1, 0, 1)
         size = math.sqrt((b[1] - b[0]) ** 2 + (b[3] - b[2]) ** 2 + (b[5] - b[4]) ** 2) or 1.0
         # Verschieben in Bildschirmebene (volle Auslenkung ≈ 2,4 Bildhälften pro Sekunde)
@@ -628,12 +810,28 @@ class Viewport(QVTKRenderWindowInteractor):
                 cam.SetParallelScale(max(cam.GetParallelScale() / factor, size * 1e-4))
             else:
                 cam.Dolly(factor)
-        # Drehen um den Mittelpunkt (volle Auslenkung ≈ 150° pro Sekunde)
+        # Drehen um den Mittelpunkt (volle Auslenkung ≈ 150° pro Sekunde).
+        # Eine gemeinsame Drehung um die Kameraachsen – dabei wird der Oben-Vektor
+        # mitgedreht. (Camera.Elevation lässt ihn stehen; beim Überkippen klappt die
+        # Ansicht dann schlagartig um – das war das "Springen".)
         deg = 150.0 * dt
-        cam.Elevation(rx * deg)
-        cam.Azimuth(-rz * deg)
-        cam.Roll(ry * deg)
-        cam.OrthogonalizeViewUp()
+        up = cam.GetViewUp()
+        dop = cam.GetDirectionOfProjection()
+        right = (
+            dop[1] * up[2] - dop[2] * up[1],
+            dop[2] * up[0] - dop[0] * up[2],
+            dop[0] * up[1] - dop[1] * up[0],
+        )
+        w = [-rx * right[i] - rz * up[i] + ry * dop[i] for i in range(3)]
+        mag = math.sqrt(sum(v * v for v in w))
+        if mag > 1e-9:
+            f = cam.GetFocalPoint()
+            t = vtkTransform()
+            t.Translate(*f)
+            t.RotateWXYZ(mag * deg, *(v / mag for v in w))
+            t.Translate(-f[0], -f[1], -f[2])
+            cam.SetPosition(*t.TransformPoint(cam.GetPosition()))
+            cam.SetViewUp(*t.TransformVector(up))
         self.renderer.ResetCameraClippingRange()
         self.render()
 
@@ -701,6 +899,8 @@ class Viewport(QVTKRenderWindowInteractor):
         if on:
             self.measureStatus.emit("Messen: ersten Punkt auf dem Modell anklicken")
         else:
+            # Messen beendet: alle Bemaßungen wieder entfernen
+            self.clear_measurements()
             self.measureStatus.emit("")
 
     def _model_size(self) -> float:
@@ -781,6 +981,17 @@ class Viewport(QVTKRenderWindowInteractor):
         writer.SetFileName(path)
         writer.SetInputConnection(w2i.GetOutputPort())
         writer.Write()
+        self.render()
+
+    def request_render(self):
+        """Neuzeichnen beim nächsten Durchlauf der Ereignisschleife – mehrere schnelle
+        Änderungen (z. B. Schieberegler) werden so zu einem Bild zusammengefasst."""
+        if not self._render_pending:
+            self._render_pending = True
+            QTimer.singleShot(0, self._do_pending_render)
+
+    def _do_pending_render(self):
+        self._render_pending = False
         self.render()
 
     def render(self):
