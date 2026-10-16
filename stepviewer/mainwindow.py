@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, ORG_NAME, VERSION, spacemouse
 from .loader import SUPPORTED_EXT, LoadError, LoadedModel, ModelLoader, ModelNode
+from .settings import SettingsDialog, load_mouse_settings
 from .viewer import Viewport
 
 FILE_FILTER = (
@@ -143,6 +144,9 @@ class MainWindow(QMainWindow):
         self.a_shot = self._act("Bild speichern …", self.save_screenshot, "Ctrl+Shift+S",
                                 tip="Aktuelle Ansicht als PNG speichern")
         self.a_quit = self._act("Beenden", self.close, QKeySequence.Quit)
+        self.a_prefs = self._act("Einstellungen …", self._show_settings, "Ctrl+,",
+                                 tip="Maustasten und weitere Einstellungen (Strg+,)")
+        self.a_prefs.setMenuRole(QAction.PreferencesRole)  # macOS: im Programm-Menü
 
         self.a_fit = self._act("Einpassen", lambda: self.viewport.fit(), "F", tip="Alles einpassen (F)")
         self.view_actions = {}
@@ -226,6 +230,8 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_reload)
         m.addSeparator()
         m.addAction(self.a_shot)
+        m.addSeparator()
+        m.addAction(self.a_prefs)
         m.addSeparator()
         m.addAction(self.a_quit)
 
@@ -358,10 +364,6 @@ class MainWindow(QMainWindow):
                                    "Pfeil ziehen = drehen")
         self.sec_handle.toggled.connect(self._section_handle)
         tb.addWidget(self.sec_handle)
-        self.sec_caps = QCheckBox("Schnittfläche färben")
-        self.sec_caps.setChecked(True)
-        self.sec_caps.toggled.connect(self._section_caps)
-        tb.addWidget(self.sec_caps)
         tb.setVisible(False)
         self.addToolBar(tb)
         self.section_bar = tb
@@ -410,6 +412,7 @@ class MainWindow(QMainWindow):
         axes = self.settings.value("axes", True, type=bool)
         self.a_axes.setChecked(axes)
         self._update_recent_menu()
+        self._apply_mouse_settings()
         if self.settings.value("spacemouse", False, type=bool) and spacemouse.available():
             self.a_spacemouse.setChecked(True)
             QTimer.singleShot(500, lambda: self._toggle_spacemouse(True))
@@ -800,9 +803,6 @@ class MainWindow(QMainWindow):
     def _section_handle(self, on):
         self.viewport.set_section_handle(on)
 
-    def _section_caps(self, on):
-        self.viewport.set_section_caps(on)
-
     def _section_slider(self, value):
         if self._sec_syncing:
             return
@@ -928,14 +928,24 @@ class MainWindow(QMainWindow):
         elif idx == 1:
             self.viewport.set_view("iso")
 
+    # ------------------------------------------------------- Einstellungen
+    def _apply_mouse_settings(self):
+        mapping, invert = load_mouse_settings(self.settings)
+        self.viewport.set_mouse_map(mapping, invert)
+
+    def _show_settings(self):
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec():
+            self._apply_mouse_settings()
+            self.statusBar().showMessage("Einstellungen gespeichert", 4000)
+
     # --------------------------------------------------------------- Hilfe
     def _show_help(self):
         QMessageBox.information(
             self,
             "Bedienung",
-            "<b>Maus</b><br>"
-            "Linke Taste ziehen: Drehen<br>"
-            "Rechte oder mittlere Taste ziehen: Verschieben<br>"
+            "<b>Maus</b> (Belegung unter Datei → Einstellungen änderbar)<br>"
+            "Standard: linke Taste ziehen = Drehen, rechte oder mittlere Taste = Verschieben<br>"
             "Mausrad: Zoomen<br>"
             "Klick auf Bauteil: Auswählen (Strg = Mehrfachauswahl)<br><br>"
             "<b>Tasten</b><br>"

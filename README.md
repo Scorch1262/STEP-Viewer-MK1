@@ -6,7 +6,7 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
 3Dconnexion-Treiber. Kein Browserprogramm, sondern ein eigenes Programmfenster
 (Qt + VTK, Geometrie über Open CASCADE).
 
-**Version:** siehe `stepviewer/__init__.py` (aktuell 1.2.0)
+**Version:** siehe `stepviewer/__init__.py` (aktuell 1.3.0)
 
 ## Funktionen
 
@@ -19,7 +19,9 @@ Eigenständiger 3D-Viewer für CAD-Dateien – angelehnt an den STEP-Viewer aus 
   Parallel-/Perspektivprojektion, Achsenkreuz, drei Hintergründe
 - Messen: Abstand zwischen zwei Punkten (mit ΔX/ΔY/ΔZ); beim Ausschalten verschwinden die Bemaßungen
 - Schnittansicht: Ebene per X/Y/Z, Blickrichtung, Schieberegler, mm-Wert oder frei mit der Maus
-  platzieren und drehen, rote Schnittflächen
+  platzieren und drehen, Schnittflächen in den Originalfarben der Bauteile
+- Einstellungen: Maustasten (links/Mitte/rechts) frei belegbar für Drehen, Verschieben, Zoomen –
+  dauerhaft gespeichert, gelten bei jedem Start und auch nach Updates
 - Info-Bereich: Abmessungen, Bauteilanzahl, Dreiecke, Abmessungen der Auswahl
 - Bild der Ansicht als PNG speichern
 - Drag & Drop, „Zuletzt geöffnet“, Öffnen per Doppelklick/„Öffnen mit“
@@ -38,8 +40,8 @@ Im Ordner `beispiele/` liegen zwei STEP-Dateien zum Ausprobieren:
 
 | Aktion | Maus / Taste |
 |---|---|
-| Drehen | linke Maustaste ziehen |
-| Verschieben | rechte oder mittlere Maustaste ziehen |
+| Drehen | linke Maustaste ziehen (Standard – änderbar unter Datei → Einstellungen) |
+| Verschieben | rechte oder mittlere Maustaste ziehen (Standard), Shift + Dreh-Taste |
 | Zoomen | Mausrad |
 | Auswählen | Klick auf Bauteil (Strg = Mehrfachauswahl) |
 | Einpassen / Auswahl einpassen | F / Shift+F |
@@ -49,6 +51,12 @@ Im Ordner `beispiele/` liegen zwei STEP-Dateien zum Ausprobieren:
 | Messen | M (Esc beendet, Bemaßungen verschwinden) |
 | Schnitt | S – Leiste darunter; im 3D-Fenster Ebene ziehen = verschieben, Pfeil ziehen = drehen |
 | Neu laden | F5 |
+| Einstellungen | Strg+, (macOS: Cmd+,) |
+
+Die Einstellungen (Maustasten, Darstellung, zuletzt geöffnete Dateien) werden im Benutzerprofil
+gespeichert – Windows: `HKEY_CURRENT_USER\Software\Scorch1262\STEP-Viewer-MK1`,
+macOS: `~/Library/Preferences/` (Datei mit „STEP-Viewer-MK1“ im Namen). Sie bleiben bei Updates und
+Neuinstallationen erhalten.
 
 ## Build über GitHub Actions
 

@@ -1,5 +1,16 @@
 # Änderungen
 
+## 1.3.0 – Einstellungen und Schnitt in Originalfarben
+- Schnittansicht: Die Schnittflächen zeigen jetzt die Originalfarben der Bauteile (inkl. Flächenfarben
+  aus der Datei); der Schnitt bringt keine eigene Farbe mehr mit. Option „Schnittfläche färben“ entfällt.
+- Neu: Einstellungen (Datei → Einstellungen …, Strg+, / macOS: Programm-Menü, Cmd+,)
+  - Belegung jeder Maustaste (links, Mitte, rechts) frei wählbar: Drehen, Verschieben oder Zoomen
+  - Zoomrichtung des Mausrads umkehrbar
+  - Kurzer Klick mit der linken Taste wählt weiterhin immer ein Bauteil aus
+  - Mit der Dreh-Taste: Shift = verschieben, Strg = um die Blickachse drehen
+- Einstellungen werden dauerhaft im Benutzerprofil gespeichert (Windows: Registrierung,
+  macOS: Einstellungsdatei) und gelten bei jedem Start – auch nach Updates oder Neuinstallation
+
 ## 1.2.0 – Schnittansicht
 - Neu: Schnittansicht über den Schalter „Schnitt“ in der Leiste (Taste S). Darunter erscheint eine
   eigene Schnitt-Leiste:

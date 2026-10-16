@@ -67,7 +67,6 @@ from .loader import LoadedModel, ModelNode  # noqa: E402
 HIGHLIGHT = (1.0, 0.55, 0.10)
 EDGE_COLOR = (0.08, 0.08, 0.10)
 MEASURE_COLOR = (1.0, 0.85, 0.15)
-CUT_COLOR = (0.86, 0.22, 0.18)  # Farbe der Schnittflächen
 
 BACKGROUNDS = {
     "dunkel": ((0.12, 0.13, 0.16), (0.30, 0.33, 0.39)),
@@ -124,40 +123,77 @@ def _transformed(poly, matrix):
     return out
 
 
+# Maustasten-Belegung: Taste -> Aufgabe ("rotate", "pan", "zoom")
+DEFAULT_MOUSE_MAP = {"left": "rotate", "middle": "pan", "right": "pan"}
+MOUSE_BUTTONS = ("left", "middle", "right")
+
+
 class _Style(vtkInteractorStyleTrackballCamera):
-    """Links drehen, Mitte/Shift verschieben, Rad zoomen, Klick = auswählen."""
+    """Frei belegbare Maustasten (Drehen / Verschieben / Zoomen).
+
+    Ein kurzer Klick mit der linken Taste (ohne Ziehen) wählt immer ein Bauteil aus.
+    Mit Shift wird beim Drehen verschoben, mit Strg um die Blickachse gedreht.
+    """
+
+    _EVENTS = {
+        "left": ("LeftButtonPressEvent", "LeftButtonReleaseEvent"),
+        "middle": ("MiddleButtonPressEvent", "MiddleButtonReleaseEvent"),
+        "right": ("RightButtonPressEvent", "RightButtonReleaseEvent"),
+    }
 
     def __init__(self, viewport: "Viewport"):
         super().__init__()
         self.viewport = viewport
-        self._press_pos = None
-        self.AddObserver("LeftButtonPressEvent", self._on_left_press)
-        self.AddObserver("LeftButtonReleaseEvent", self._on_left_release)
-        self.AddObserver("RightButtonPressEvent", self._on_right_press)
-        self.AddObserver("RightButtonReleaseEvent", self._on_right_release)
+        self.mouse_map = dict(DEFAULT_MOUSE_MAP)
+        self.invert_wheel = False
+        self._press_pos = {}
+        self._active = None  # (Taste, Aufgabe)
+        for button, (press, release) in self._EVENTS.items():
+            self.AddObserver(press, lambda o, e, b=button: self._press(b))
+            self.AddObserver(release, lambda o, e, b=button: self._release(b))
+        self.AddObserver("MouseWheelForwardEvent", lambda *a: self._wheel(True))
+        self.AddObserver("MouseWheelBackwardEvent", lambda *a: self._wheel(False))
         self.AddObserver("StartInteractionEvent", lambda *a: self.viewport.begin_interaction())
         self.AddObserver("EndInteractionEvent", lambda *a: self.viewport.end_interaction(200))
 
-    def _on_left_press(self, obj, event):
-        self._press_pos = self.GetInteractor().GetEventPosition()
-        self.OnLeftButtonDown()
+    def _press(self, button):
+        iren = self.GetInteractor()
+        pos = iren.GetEventPosition()
+        self._press_pos[button] = pos
+        if self._active is not None:
+            return  # schon eine andere Taste aktiv
+        self.FindPokedRenderer(pos[0], pos[1])
+        if self.GetCurrentRenderer() is None:
+            return
+        action = self.mouse_map.get(button, "pan")
+        if action == "rotate":
+            if iren.GetShiftKey():
+                action = "pan"
+            elif iren.GetControlKey():
+                action = "spin"
+        self._active = (button, action)
+        {"rotate": self.StartRotate, "pan": self.StartPan,
+         "zoom": self.StartDolly, "spin": self.StartSpin}[action]()
 
-    def _on_left_release(self, obj, event):
-        self.OnLeftButtonUp()
-        pos = self.GetInteractor().GetEventPosition()
-        if self._press_pos is not None:
-            dx = abs(pos[0] - self._press_pos[0])
-            dy = abs(pos[1] - self._press_pos[1])
-            if dx <= 3 and dy <= 3:
+    def _release(self, button):
+        if self._active is not None and self._active[0] == button:
+            action = self._active[1]
+            self._active = None
+            {"rotate": self.EndRotate, "pan": self.EndPan,
+             "zoom": self.EndDolly, "spin": self.EndSpin}[action]()
+        start = self._press_pos.pop(button, None)
+        if button == "left" and start is not None:
+            pos = self.GetInteractor().GetEventPosition()
+            if abs(pos[0] - start[0]) <= 3 and abs(pos[1] - start[1]) <= 3:
                 self.viewport.handle_click(pos[0], pos[1])
-        self._press_pos = None
 
-    # Rechte Maustaste: verschieben (wie in vielen CAD-Viewern)
-    def _on_right_press(self, obj, event):
-        self.StartPan()
-
-    def _on_right_release(self, obj, event):
-        self.EndPan()
+    def _wheel(self, forward: bool):
+        if self.invert_wheel:
+            forward = not forward
+        if forward:
+            self.OnMouseWheelForward()
+        else:
+            self.OnMouseWheelBackward()
 
 
 class Viewport(QVTKRenderWindowInteractor):
@@ -246,12 +282,9 @@ class Viewport(QVTKRenderWindowInteractor):
 
         # Schnitt
         self.section_on = False
-        self.section_caps = True
         self.section_handle = True
         self.section_plane = vtkPlane()
         self.section_plane.SetNormal(1, 0, 0)
-        self.cap_actor: Optional[vtkActor] = None
-        self.cap_attrs = vtkCompositeDataDisplayAttributes()
         self.section_widget: Optional[vtkImplicitPlaneWidget2] = None
         self.section_rep: Optional[vtkImplicitPlaneRepresentation] = None
 
@@ -375,11 +408,10 @@ class Viewport(QVTKRenderWindowInteractor):
 
     # -- Modell --------------------------------------------------------------
     def clear(self):
-        for a in (self.faces_actor, self.edges_actor, self.cap_actor):
+        for a in (self.faces_actor, self.edges_actor):
             if a is not None:
                 self.renderer.RemoveActor(a)
-        self.faces_actor = self.edges_actor = self.cap_actor = None
-        self.cap_attrs = vtkCompositeDataDisplayAttributes()
+        self.faces_actor = self.edges_actor = None
         self.parts.clear()
         self._part_by_flat.clear()
         self._edge_cells = 0
@@ -452,28 +484,9 @@ class Viewport(QVTKRenderWindowInteractor):
         ea.GetProperty().LightingOff()
         ea.PickableOff()
 
-        # Schnittflächen: dieselben Flächen noch einmal, aber nur die Innenseiten
-        # (Vorderseiten ausgeblendet) in Schnittfarbe. Bei einem Schnitt blickt man
-        # in die Körper hinein – die Innenseiten wirken wie massive Schnittflächen.
-        cm = vtkCompositePolyDataMapper()
-        cm.SetInputDataObject(faces_mb)
-        cm.SetCompositeDataDisplayAttributes(self.cap_attrs)
-        cm.ScalarVisibilityOff()
-        ca = vtkActor()
-        ca.SetMapper(cm)
-        cp = ca.GetProperty()
-        cp.SetColor(*CUT_COLOR)
-        cp.SetAmbient(0.55)
-        cp.SetDiffuse(0.45)
-        cp.SetSpecular(0.0)
-        cp.FrontfaceCullingOn()
-        ca.PickableOff()
-        ca.SetVisibility(False)
-
-        self.faces_actor, self.edges_actor, self.cap_actor = fa, ea, ca
+        self.faces_actor, self.edges_actor = fa, ea
         self.renderer.AddActor(fa)
         self.renderer.AddActor(ea)
-        self.renderer.AddActor(ca)
         for p in self.parts:
             self._style_part(p)
         self._apply_display()
@@ -505,9 +518,6 @@ class Viewport(QVTKRenderWindowInteractor):
         self.faces_actor.SetPickable(show_faces)
         self.edges_actor.SetVisibility(show_edges and not self._interacting_hidden_edges)
         self.faces_actor.GetProperty().SetOpacity(0.35 if self.transparent else 1.0)
-        if self.cap_actor is not None:
-            self.cap_actor.SetVisibility(self.section_on and self.section_caps and show_faces)
-            self.cap_actor.GetProperty().SetOpacity(0.35 if self.transparent else 1.0)
         if show_faces:
             ec = EDGE_COLOR
         else:
@@ -518,7 +528,6 @@ class Viewport(QVTKRenderWindowInteractor):
         fa, ea = self.face_attrs, self.edge_attrs
         fa.SetBlockVisibility(p.faces, p.visible)
         fa.SetBlockPickability(p.faces, p.visible)
-        self.cap_attrs.SetBlockVisibility(p.faces, p.visible)
         ea.SetBlockVisibility(p.edges, p.visible)
         if p.selected:
             fa.SetBlockColor(p.faces, HIGHLIGHT)
@@ -533,11 +542,9 @@ class Viewport(QVTKRenderWindowInteractor):
     def _attrs_changed(self):
         self.face_attrs.Modified()
         self.edge_attrs.Modified()
-        self.cap_attrs.Modified()
         if self.faces_actor is not None:
             self.faces_actor.GetMapper().Modified()
             self.edges_actor.GetMapper().Modified()
-            self.cap_actor.GetMapper().Modified()
 
     def set_background(self, name: str):
         self.background = name
@@ -594,6 +601,14 @@ class Viewport(QVTKRenderWindowInteractor):
             self._attrs_changed()
         self.render()
 
+    # -- Maus ----------------------------------------------------------------
+    def set_mouse_map(self, mapping: dict, invert_wheel: bool = False):
+        m = dict(DEFAULT_MOUSE_MAP)
+        m.update({k: v for k, v in mapping.items() if k in MOUSE_BUTTONS and v in ("rotate", "pan", "zoom")})
+        self.style.mouse_map = m
+        self.style.invert_wheel = invert_wheel
+        log.info("Maustasten: %s, Mausrad umgekehrt: %s", m, invert_wheel)
+
     # -- Schnitt -------------------------------------------------------------
     def set_section_enabled(self, on: bool):
         if on == self.section_on:
@@ -621,20 +636,16 @@ class Viewport(QVTKRenderWindowInteractor):
         if self.faces_actor is None:
             self._update_section_widget()
             return
-        mappers = (self.faces_actor.GetMapper(), self.edges_actor.GetMapper(), self.cap_actor.GetMapper())
+        mappers = (self.faces_actor.GetMapper(), self.edges_actor.GetMapper())
         for m in mappers:
             m.RemoveAllClippingPlanes()
             if self.section_on:
                 m.AddClippingPlane(self.section_plane)
-        # Bei aktivem Schnitt nur Außenseiten zeichnen, Innenseiten übernimmt die Schnittfarbe
-        self.faces_actor.GetProperty().SetBackfaceCulling(self.section_on and self.section_caps)
+        # Im Schnitt sieht man in die Körper hinein: die Innenseiten werden in der
+        # Originalfarbe des jeweiligen Bauteils gezeichnet (keine eigene Schnittfarbe)
         self._apply_display()
         self._update_section_widget()
         self.render()
-
-    def set_section_caps(self, on: bool):
-        self.section_caps = on
-        self._apply_section()
 
     def set_section_handle(self, on: bool):
         self.section_handle = on
