@@ -165,11 +165,21 @@ def _matrix_from_location(loc: TopLoc_Location) -> tuple:
 
 
 def _mat_mul(a: tuple, b: tuple) -> tuple:
-    out = []
-    for r in range(4):
-        for c in range(4):
-            out.append(sum(a[r * 4 + k] * b[k * 4 + c] for k in range(4)))
-    return tuple(out)
+    if a == IDENTITY:
+        return b
+    if b == IDENTITY:
+        return a
+    a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11 = a[:12]
+    b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11 = b[:12]
+    return (
+        a0 * b0 + a1 * b4 + a2 * b8, a0 * b1 + a1 * b5 + a2 * b9, a0 * b2 + a1 * b6 + a2 * b10,
+        a0 * b3 + a1 * b7 + a2 * b11 + a3,
+        a4 * b0 + a5 * b4 + a6 * b8, a4 * b1 + a5 * b5 + a6 * b9, a4 * b2 + a5 * b6 + a6 * b10,
+        a4 * b3 + a5 * b7 + a6 * b11 + a7,
+        a8 * b0 + a9 * b4 + a10 * b8, a8 * b1 + a9 * b5 + a10 * b9, a8 * b2 + a9 * b6 + a10 * b10,
+        a8 * b3 + a9 * b7 + a10 * b11 + a11,
+        0.0, 0.0, 0.0, 1.0,
+    )
 
 
 def _shape_bounds(shape: TopoDS_Shape) -> Optional[tuple]:
@@ -504,7 +514,7 @@ class ModelLoader:
         face_colors = self._face_colors(label)
         key = _label_entry(label)
         node = self._make_part_node(name or "Bauteil", shape, face_colors, color, key)
-        node.matrix = _mat_mul(matrix, node.matrix) if node.mesh_key else matrix
+        node.matrix = matrix
         if node.children:
             for c in node.children:
                 c.matrix = matrix

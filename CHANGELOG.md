@@ -1,5 +1,19 @@
 # Änderungen
 
+## 1.1.0 – Leistung bei großen Baugruppen
+- Alle Bauteile werden gebündelt in nur noch zwei Zeichenobjekten dargestellt (Flächen und Kanten,
+  vtkCompositePolyDataMapper) statt zwei Objekten pro Bauteil. Bei 5000 Teilen entfallen damit
+  über 10.000 einzelne Zeichenaufrufe pro Bild – Drehen und Verschieben laufen deutlich flüssiger.
+- SpaceMouse ohne Nachlauf: Die Bewegung wird einmal pro Bild als aktueller Zustand abgefragt statt
+  als Warteschlange abgearbeitet; die Geschwindigkeit ist unabhängig von der Bildrate.
+- Große Modelle: Kanten und Kantenglättung werden während der Bewegung ausgeblendet und danach sofort
+  wieder eingeblendet (abschaltbar unter Ansicht → „Kanten beim Bewegen ausblenden“)
+- macOS (Retina): während der Bewegung wird in halber Auflösung gerendert, im Stillstand wieder scharf
+- Ein-/Ausblenden im Modellbaum: Änderungen werden gesammelt und in einem Schritt angewendet
+  (Gruppe mit 5000 Teilen ausblenden: vorher ca. 50 s, jetzt sofort)
+- Auswahl per Klick: Treffersuche über die Umrissboxen der Bauteile (wenige Millisekunden)
+- Schnellere Berechnung der Einbaulagen beim Laden
+
 ## 1.0.3
 - macOS: neue Offscreen-Darstellung. VTK rendert unsichtbar im Hintergrund, Qt zeigt das fertige
   Bild an. Damit hängt kein eigener VTK-OpenGL-Kontext mehr am Programmfenster – dieser hat die

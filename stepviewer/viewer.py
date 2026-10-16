@@ -31,19 +31,25 @@ import vtkmodules.vtkRenderingFreeType  # noqa: F401,E402
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401,E402
 import vtkmodules.vtkRenderingContextOpenGL2  # noqa: F401,E402
 
-from PySide6.QtCore import Qt, Signal  # noqa: E402
+from PySide6.QtCore import Qt, QTimer, Signal  # noqa: E402
 from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QWidget  # noqa: E402
 from vtkmodules.vtkCommonCore import vtkUnsignedCharArray  # noqa: E402
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor  # noqa: E402
+from vtkmodules.vtkCommonDataModel import vtkMultiBlockDataSet, vtkPolyData  # noqa: E402
 from vtkmodules.vtkCommonMath import vtkMatrix4x4  # noqa: E402
+from vtkmodules.vtkCommonTransforms import vtkTransform  # noqa: E402
+from vtkmodules.vtkFiltersGeneral import vtkTransformPolyDataFilter  # noqa: E402
 from vtkmodules.vtkFiltersSources import vtkLineSource, vtkSphereSource  # noqa: E402
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera  # noqa: E402
 from vtkmodules.vtkInteractionWidgets import vtkOrientationMarkerWidget  # noqa: E402
 from vtkmodules.vtkIOImage import vtkPNGWriter  # noqa: E402
 from vtkmodules.vtkRenderingAnnotation import vtkAxesActor  # noqa: E402
+from vtkmodules.vtkRenderingCore import vtkLightKit  # noqa: E402
 from vtkmodules.vtkRenderingCore import (  # noqa: E402
     vtkRenderWindow,
+    vtkCompositeDataDisplayAttributes,
+    vtkCompositePolyDataMapper,
     vtkActor,
     vtkBillboardTextActor3D,
     vtkCellPicker,
@@ -76,14 +82,41 @@ VIEWS = {
 }
 
 
+IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+
+
 class PartActors:
-    def __init__(self, node: ModelNode, faces: vtkActor, edges: vtkActor, has_colors: bool):
+    """Ein Bauteil als Block im gemeinsamen Flächen- und Kanten-Datensatz."""
+
+    __slots__ = ("node", "faces", "edges", "has_colors", "index", "bounds", "visible", "selected")
+
+    def __init__(self, node: ModelNode, faces, edges, has_colors: bool, index: int):
         self.node = node
-        self.faces = faces
-        self.edges = edges
+        self.faces = faces  # vtkPolyData-Block (Flächen)
+        self.edges = edges  # vtkPolyData-Block (Kanten)
         self.has_colors = has_colors
+        self.index = index
+        self.bounds = faces.GetBounds()
         self.visible = True
         self.selected = False
+
+
+def _transformed(poly, matrix):
+    """Kopie eines Netzes in Einbaulage (Normalen werden mitgedreht)."""
+    out = vtkPolyData()
+    if tuple(matrix) == IDENTITY:
+        out.ShallowCopy(poly)
+        return out
+    m = vtkMatrix4x4()
+    m.DeepCopy(matrix)
+    t = vtkTransform()
+    t.SetMatrix(m)
+    f = vtkTransformPolyDataFilter()
+    f.SetInputData(poly)
+    f.SetTransform(t)
+    f.Update()
+    out.ShallowCopy(f.GetOutput())
+    return out
 
 
 class _Style(vtkInteractorStyleTrackballCamera):
@@ -97,6 +130,8 @@ class _Style(vtkInteractorStyleTrackballCamera):
         self.AddObserver("LeftButtonReleaseEvent", self._on_left_release)
         self.AddObserver("RightButtonPressEvent", self._on_right_press)
         self.AddObserver("RightButtonReleaseEvent", self._on_right_release)
+        self.AddObserver("StartInteractionEvent", lambda *a: self.viewport.begin_interaction())
+        self.AddObserver("EndInteractionEvent", lambda *a: self.viewport.end_interaction(200))
 
     def _on_left_press(self, obj, event):
         self._press_pos = self.GetInteractor().GetEventPosition()
@@ -147,14 +182,22 @@ class Viewport(QVTKRenderWindowInteractor):
         self._ready = False
         self._failed = False
         self._Iren.EnableRenderOff()  # auch Mausaktionen rendern erst nach dem Start
+        self._render_scale = None
         if OFFSCREEN:
             # Renderwünsche des Interaktors (Drehen, Zoomen …) als Qt-Neuzeichnen ausführen
             self._Iren.AddObserver("RenderEvent", lambda *a: self.update())
+            # Mauskoordinaten passend zur aktuellen Renderauflösung umrechnen
+            self._getPixelRatio = self._scale
         log.info("Darstellung: %s", RENDER_MODE)
         self.setFocusPolicy(Qt.StrongFocus)
         self.renderer = vtkRenderer()
         self.renderer.GradientBackgroundOn()
         self.renderer.SetUseFXAA(True)
+        # CAD-typische Beleuchtung (Haupt-, Aufhell-, Gegen- und Kopflicht), folgt der Kamera:
+        # gleich geneigte Flächen bekommen so unterschiedliche Helligkeit
+        self.light_kit = vtkLightKit()
+        self.light_kit.SetKeyLightIntensity(0.9)
+        self.light_kit.AddLightsToRenderer(self.renderer)
         self.render_window = self.GetRenderWindow()
         self.render_window.AddRenderer(self.renderer)
         self.render_window.SetMultiSamples(0)
@@ -167,6 +210,17 @@ class Viewport(QVTKRenderWindowInteractor):
         self.picker.SetTolerance(0.0005)
 
         self.parts: list[PartActors] = []
+        self._part_by_flat: dict = {}
+        self.faces_actor: Optional[vtkActor] = None
+        self.edges_actor: Optional[vtkActor] = None
+        self.face_attrs = vtkCompositeDataDisplayAttributes()
+        self.edge_attrs = vtkCompositeDataDisplayAttributes()
+        self._edge_cells = 0
+        self._interacting_hidden_edges = False
+        self.lod_enabled = True
+        self._lod_timer = QTimer(self)
+        self._lod_timer.setSingleShot(True)
+        self._lod_timer.timeout.connect(self.end_interaction)
         self.model: Optional[LoadedModel] = None
         self.display_mode = "schattiert_kanten"
         self.transparent = False
@@ -228,8 +282,12 @@ class Viewport(QVTKRenderWindowInteractor):
             return QWidget.paintEngine(self)
         return super().paintEngine()
 
+    def _scale(self) -> float:
+        """Renderauflösung je logischem Pixel (Retina: 2, bei Bewegung ggf. 1)."""
+        return self._render_scale or self.devicePixelRatioF()
+
     def _resize_offscreen(self):
-        scale = self.devicePixelRatioF()
+        scale = self._scale()
         w = max(1, int(round(self.width() * scale)))
         h = max(1, int(round(self.height() * scale)))
         rw = self.GetRenderWindow()
@@ -275,8 +333,9 @@ class Viewport(QVTKRenderWindowInteractor):
             buf = memoryview(data).tobytes()
             img = QImage(buf, w, h, w * 4, QImage.Format_RGBA8888)
             img = img.flipped(Qt.Vertical) if hasattr(img, "flipped") else img.mirrored(False, True)
-            img.setDevicePixelRatio(self.devicePixelRatioF())
+            img.setDevicePixelRatio(self._scale())
             p = QPainter(self)
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
             p.drawImage(0, 0, img)
             p.end()
         except Exception:  # noqa: BLE001
@@ -298,76 +357,91 @@ class Viewport(QVTKRenderWindowInteractor):
 
     # -- Modell --------------------------------------------------------------
     def clear(self):
-        for p in self.parts:
-            self.renderer.RemoveActor(p.faces)
-            self.renderer.RemoveActor(p.edges)
+        for a in (self.faces_actor, self.edges_actor):
+            if a is not None:
+                self.renderer.RemoveActor(a)
+        self.faces_actor = self.edges_actor = None
         self.parts.clear()
+        self._part_by_flat.clear()
+        self._edge_cells = 0
+        self.face_attrs = vtkCompositeDataDisplayAttributes()
+        self.edge_attrs = vtkCompositeDataDisplayAttributes()
         self.clear_measurements()
         self.model = None
 
     def set_model(self, model: LoadedModel) -> dict:
-        """Erzeugt die Darstellung und liefert {id(node): PartActors}."""
+        """Erzeugt die Darstellung und liefert {id(node): PartActors}.
+
+        Alle Bauteile kommen in EINEN Flächen- und EINEN Kanten-Datensatz
+        (vtkMultiBlockDataSet). VTK zeichnet sie gebündelt mit wenigen
+        Zeichenaufrufen – entscheidend bei Baugruppen mit tausenden Teilen.
+        """
         self.clear()
         self.model = model
-        mapping = {}
-        mappers = {}
+        leaves = []
 
         def visit(node: ModelNode):
             if node.mesh_key:
-                mesh = model.meshes[node.mesh_key]
-                if node.mesh_key not in mappers:
-                    fm = vtkPolyDataMapper()
-                    fm.SetInputData(mesh.faces)
-                    fm.SetScalarModeToUseCellData()
-                    fm.SetColorModeToDirectScalars()
-                    fm.SetResolveCoincidentTopologyToPolygonOffset()
-                    fm.SetRelativeCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
-                    em = vtkPolyDataMapper()
-                    em.SetInputData(mesh.edges)
-                    em.ScalarVisibilityOff()
-                    mappers[node.mesh_key] = (fm, em)
-                fm, em = mappers[node.mesh_key]
-                matrix = vtkMatrix4x4()
-                matrix.DeepCopy(node.matrix)
-
-                fa = vtkActor()
-                fa.SetMapper(fm)
-                fa.SetUserMatrix(matrix)
-                prop = fa.GetProperty()
-                prop.SetInterpolationToPhong()
-                prop.SetAmbient(0.18)
-                prop.SetDiffuse(0.78)
-                prop.SetSpecular(0.25)
-                prop.SetSpecularPower(30)
-                prop.SetColor(*node.color)
-                prop.BackfaceCullingOff()
-
-                ea = vtkActor()
-                ea.SetMapper(em)
-                ea.SetUserMatrix(matrix)
-                ea.GetProperty().SetColor(*EDGE_COLOR)
-                ea.GetProperty().SetLineWidth(1.2)
-                ea.GetProperty().LightingOff()
-                ea.PickableOff()
-
-                part = PartActors(node, fa, ea, mesh.has_face_colors)
-                self.parts.append(part)
-                mapping[id(node)] = part
-                self.renderer.AddActor(fa)
-                self.renderer.AddActor(ea)
+                leaves.append(node)
             for c in node.children:
                 visit(c)
 
         visit(model.root)
+        faces_mb = vtkMultiBlockDataSet()
+        edges_mb = vtkMultiBlockDataSet()
+        faces_mb.SetNumberOfBlocks(len(leaves))
+        edges_mb.SetNumberOfBlocks(len(leaves))
+        mapping = {}
+        for i, node in enumerate(leaves):
+            mesh = model.meshes[node.mesh_key]
+            f = _transformed(mesh.faces, node.matrix)
+            e = _transformed(mesh.edges, node.matrix)
+            faces_mb.SetBlock(i, f)
+            edges_mb.SetBlock(i, e)
+            self._edge_cells += e.GetNumberOfCells()
+            part = PartActors(node, f, e, mesh.has_face_colors, i)
+            self.parts.append(part)
+            self._part_by_flat[i + 1] = part  # flacher Index: 0 = Wurzel
+            mapping[id(node)] = part
+
+        fm = vtkCompositePolyDataMapper()
+        fm.SetInputDataObject(faces_mb)
+        fm.SetCompositeDataDisplayAttributes(self.face_attrs)
+        fm.SetScalarModeToUseCellFieldData()
+        fm.SelectColorArray("Farben")
+        fm.SetColorModeToDirectScalars()
+        fm.ScalarVisibilityOn()
+        fm.SetResolveCoincidentTopologyToPolygonOffset()
+        fm.SetRelativeCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
+        fa = vtkActor()
+        fa.SetMapper(fm)
+        prop = fa.GetProperty()
+        prop.SetInterpolationToPhong()
+        prop.SetAmbient(0.18)
+        prop.SetDiffuse(0.78)
+        prop.SetSpecular(0.25)
+        prop.SetSpecularPower(30)
+        prop.BackfaceCullingOff()
+
+        em = vtkCompositePolyDataMapper()
+        em.SetInputDataObject(edges_mb)
+        em.SetCompositeDataDisplayAttributes(self.edge_attrs)
+        em.ScalarVisibilityOff()
+        ea = vtkActor()
+        ea.SetMapper(em)
+        ea.GetProperty().SetLineWidth(1.2)
+        ea.GetProperty().LightingOff()
+        ea.PickableOff()
+
+        self.faces_actor, self.edges_actor = fa, ea
+        self.renderer.AddActor(fa)
+        self.renderer.AddActor(ea)
+        for p in self.parts:
+            self._style_part(p)
         self._apply_display()
         self.set_view("iso", fit=True)
+        log.info("Darstellung: %d Bauteile in 2 Zeichenobjekten", len(self.parts))
         return mapping
-
-    def _part_for_actor(self, actor) -> Optional[PartActors]:
-        for p in self.parts:
-            if p.faces is actor:
-                return p
-        return None
 
     # -- Darstellung ---------------------------------------------------------
     def set_display_mode(self, mode: str):
@@ -381,45 +455,42 @@ class Viewport(QVTKRenderWindowInteractor):
         self.render()
 
     def _apply_display(self):
-        for p in self.parts:
-            self._style_part(p)
-
-    def _style_part(self, p: PartActors):
+        """Einstellungen, die für alle Bauteile gemeinsam gelten."""
+        if self.faces_actor is None:
+            return
         show_faces = self.display_mode in ("schattiert", "schattiert_kanten")
         show_edges = self.display_mode in ("schattiert_kanten", "drahtgitter")
-        p.faces.SetVisibility(p.visible and show_faces)
-        p.edges.SetVisibility(p.visible and show_edges)
-        p.faces.SetPickable(p.visible and show_faces)
-        fprop = p.faces.GetProperty()
-        eprop = p.edges.GetProperty()
-        if p.selected:
-            fprop.SetColor(*HIGHLIGHT)
-            fprop.SetAmbient(0.35)
-            eprop.SetColor(*HIGHLIGHT)
-            eprop.SetLineWidth(2.0)
+        self.faces_actor.SetVisibility(show_faces)
+        self.faces_actor.SetPickable(show_faces)
+        self.edges_actor.SetVisibility(show_edges and not self._interacting_hidden_edges)
+        self.faces_actor.GetProperty().SetOpacity(0.35 if self.transparent else 1.0)
+        if show_faces:
+            ec = EDGE_COLOR
         else:
-            fprop.SetColor(*p.node.color)
-            fprop.SetAmbient(0.18)
-            eprop.SetColor(*(EDGE_COLOR if show_faces else (0.85, 0.88, 0.92) if self.background != "hell" else (0.1, 0.1, 0.12)))
-            eprop.SetLineWidth(1.2)
-        fprop.SetOpacity(0.35 if self.transparent else 1.0)
-        # Flächenfarben aus der Datei nur ohne Hervorhebung nutzen
-        self._set_scalar_visibility(p, p.has_colors and not p.selected)
+            ec = (0.1, 0.1, 0.12) if self.background == "hell" else (0.85, 0.88, 0.92)
+        self.edges_actor.GetProperty().SetColor(*ec)
 
-    def _set_scalar_visibility(self, p: PartActors, on: bool):
-        # Der Mapper wird von Instanzen geteilt. Für hervorgehobene Instanzen
-        # bekommt der Actor einen eigenen Mapper ohne Skalare.
-        mapper = p.faces.GetMapper()
-        if on == bool(mapper.GetScalarVisibility()):
-            return
-        new = vtkPolyDataMapper()
-        new.SetInputData(mapper.GetInput())
-        new.SetScalarModeToUseCellData()
-        new.SetColorModeToDirectScalars()
-        new.SetResolveCoincidentTopologyToPolygonOffset()
-        new.SetRelativeCoincidentTopologyPolygonOffsetParameters(1.0, 1.0)
-        new.SetScalarVisibility(on)
-        p.faces.SetMapper(new)
+    def _style_part(self, p: PartActors):
+        fa, ea = self.face_attrs, self.edge_attrs
+        fa.SetBlockVisibility(p.faces, p.visible)
+        fa.SetBlockPickability(p.faces, p.visible)
+        ea.SetBlockVisibility(p.edges, p.visible)
+        if p.selected:
+            fa.SetBlockColor(p.faces, HIGHLIGHT)
+            fa.SetBlockScalarVisibility(p.faces, False)
+            ea.SetBlockColor(p.edges, HIGHLIGHT)
+        else:
+            fa.SetBlockColor(p.faces, p.node.color)
+            # Flächenfarben aus der Datei nur für Bauteile, die welche haben
+            fa.SetBlockScalarVisibility(p.faces, p.has_colors)
+            ea.RemoveBlockColor(p.edges)
+
+    def _attrs_changed(self):
+        self.face_attrs.Modified()
+        self.edge_attrs.Modified()
+        if self.faces_actor is not None:
+            self.faces_actor.GetMapper().Modified()
+            self.edges_actor.GetMapper().Modified()
 
     def set_background(self, name: str):
         self.background = name
@@ -442,17 +513,38 @@ class Viewport(QVTKRenderWindowInteractor):
         self.camera.SetParallelProjection(on)
         self.fit()
 
-    def set_part_visible(self, p: PartActors, on: bool):
+    def set_part_visible(self, p: PartActors, on: bool, render: bool = True):
+        if p.visible == on:
+            return
         p.visible = on
         self._style_part(p)
+        self._attrs_changed()
+        if render:
+            self.render()
+
+    def set_parts_visible(self, changes: list):
+        """Mehrere Bauteile auf einmal ein-/ausblenden: [(part, sichtbar), …]."""
+        changed = False
+        for p, on in changes:
+            if p.visible != on:
+                p.visible = on
+                self._style_part(p)
+                changed = True
+        if changed:
+            self._attrs_changed()
+            self.render()
 
     def set_selection(self, parts: list):
         sel = {id(p) for p in parts}
+        changed = False
         for p in self.parts:
             was = p.selected
             p.selected = id(p) in sel
             if was != p.selected:
                 self._style_part(p)
+                changed = True
+        if changed:
+            self._attrs_changed()
         self.render()
 
     # -- Kamera --------------------------------------------------------------
@@ -461,7 +553,7 @@ class Viewport(QVTKRenderWindowInteractor):
         for p in parts if parts is not None else self.parts:
             if not p.visible:
                 continue
-            b = p.faces.GetBounds()
+            b = p.bounds
             if b[0] > b[1]:
                 continue
             for i in range(0, 6, 2):
@@ -505,12 +597,17 @@ class Viewport(QVTKRenderWindowInteractor):
         self.camera.Roll(degrees)
         self.render()
 
-    def apply_spacemouse(self, tx, ty, tz, rx, ry, rz):
-        """Bewegung einer 3Dconnexion-SpaceMouse (Werte grob -1 … 1)."""
+    def apply_spacemouse(self, tx, ty, tz, rx, ry, rz, dt: float = 1 / 60):
+        """Bewegung einer 3Dconnexion-SpaceMouse (Werte -1 … 1).
+
+        dt = Zeit seit dem letzten Bild in Sekunden: die Geschwindigkeit bleibt
+        gleich, egal wie schnell gezeichnet wird.
+        """
         cam = self.camera
+        dt = max(0.004, min(dt, 0.1))
         b = self.visible_bounds() or (0, 1, 0, 1, 0, 1)
         size = math.sqrt((b[1] - b[0]) ** 2 + (b[3] - b[2]) ** 2 + (b[5] - b[4]) ** 2) or 1.0
-        # Verschieben in Bildschirmebene
+        # Verschieben in Bildschirmebene (volle Auslenkung ≈ 2,4 Bildhälften pro Sekunde)
         pos = list(cam.GetPosition())
         foc = list(cam.GetFocalPoint())
         up = cam.GetViewUp()
@@ -520,36 +617,83 @@ class Viewport(QVTKRenderWindowInteractor):
             dop[2] * up[0] - dop[0] * up[2],
             dop[0] * up[1] - dop[1] * up[0],
         )
-        scale = (cam.GetParallelScale() if cam.GetParallelProjection() else cam.GetDistance() * 0.4) * 0.04
+        scale = (cam.GetParallelScale() if cam.GetParallelProjection() else cam.GetDistance() * 0.4) * 2.4 * dt
         move = [right[i] * tx * scale + up[i] * (-tz) * scale for i in range(3)]
         cam.SetPosition(*(pos[i] + move[i] for i in range(3)))
         cam.SetFocalPoint(*(foc[i] + move[i] for i in range(3)))
         # Zoom (nach vorne/hinten schieben)
         if abs(ty) > 0:
-            factor = 1.0 + max(-0.5, min(0.5, -ty * 0.05))
+            factor = math.exp(-ty * 3.0 * dt)
             if cam.GetParallelProjection():
                 cam.SetParallelScale(max(cam.GetParallelScale() / factor, size * 1e-4))
             else:
                 cam.Dolly(factor)
-        # Drehen um den Mittelpunkt
-        cam.Elevation(rx * 2.5)
-        cam.Azimuth(-rz * 2.5)
-        cam.Roll(ry * 2.5)
+        # Drehen um den Mittelpunkt (volle Auslenkung ≈ 150° pro Sekunde)
+        deg = 150.0 * dt
+        cam.Elevation(rx * deg)
+        cam.Azimuth(-rz * deg)
+        cam.Roll(ry * deg)
         cam.OrthogonalizeViewUp()
         self.renderer.ResetCameraClippingRange()
         self.render()
 
     # -- Auswahl & Messen ----------------------------------------------------
+    def _pick(self, x: int, y: int):
+        """Liefert (Bauteil, Weltkoordinate) unter dem Mauszeiger."""
+        if self._render_scale is not None:
+            # Koordinaten stammen aus der reduzierten Auflösung
+            f = self.devicePixelRatioF() / self._render_scale
+            x, y = int(x * f), int(y * f)
+            self.end_interaction()
+        if self.faces_actor is None or not self.faces_actor.GetVisibility():
+            return None, None
+        # Strahlauswahl prüft zuerst die Umrissboxen der Bauteile – wenige ms auch bei
+        # tausenden Teilen (schneller als die Hardware-Auswahl, die mehrfach rendert)
+        if self.picker.Pick(x, y, 0, self.renderer) and self.picker.GetActor() is self.faces_actor:
+            return self._part_by_flat.get(self.picker.GetFlatBlockIndex()), self.picker.GetPickPosition()
+        return None, None
+
     def handle_click(self, x: int, y: int):
-        hit = self.picker.Pick(x, y, 0, self.renderer)
-        actor = self.picker.GetActor() if hit else None
+        part, pos = self._pick(x, y)
         if self.measure_mode:
-            if actor is None:
-                return
-            self._add_measure_point(self.picker.GetPickPosition())
+            if part is not None and pos is not None:
+                self._add_measure_point(pos)
             return
-        part = self._part_for_actor(actor) if actor is not None else None
         self.partPicked.emit(part.node if part else None)
+
+    # -- Schnelle Darstellung während der Bewegung ---------------------------
+    def lod_active(self) -> bool:
+        """Bei großen Modellen werden die Kanten während der Bewegung ausgeblendet."""
+        return self.lod_enabled and (self._edge_cells > 150_000 or len(self.parts) > 1500)
+
+    def begin_interaction(self):
+        self._lod_timer.stop()
+        if self.lod_active() and not self._interacting_hidden_edges:
+            self._interacting_hidden_edges = True
+            self.renderer.SetUseFXAA(False)
+            self._apply_display()
+        # Offscreen auf Retina: während der Bewegung in halber Auflösung rendern
+        if OFFSCREEN and self._render_scale is None and self.devicePixelRatioF() > 1.25:
+            self._render_scale = 1.0
+            self._resize_offscreen()
+
+    def end_interaction(self, delay_ms: int = 0):
+        if delay_ms:
+            self._lod_timer.start(delay_ms)
+            return
+        self._lod_timer.stop()
+        changed = False
+        if self._interacting_hidden_edges:
+            self._interacting_hidden_edges = False
+            self.renderer.SetUseFXAA(True)
+            self._apply_display()
+            changed = True
+        if self._render_scale is not None:
+            self._render_scale = None
+            self._resize_offscreen()
+            changed = True
+        if changed:
+            self.render()
 
     def set_measure_mode(self, on: bool):
         self.measure_mode = on

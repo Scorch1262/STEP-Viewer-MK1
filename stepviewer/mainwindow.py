@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QToolBar,
     QTreeWidget,
     QTreeWidgetItem,
-    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
@@ -48,11 +47,20 @@ class MainWindow(QMainWindow):
         self.part_map: dict = {}
         self.item_for_node: dict = {}
         self._loading = False
+        self._vis_changes: dict = {}
+        self._vis_timer = QTimer(self)
+        self._vis_timer.setSingleShot(True)
+        self._vis_timer.timeout.connect(self._apply_visibility)
         self._last_events = 0.0
         self._last_stage = ""
         self._updating_tree = False
         self._load_time = 0.0
         self.sm_thread: spacemouse.SpaceMouseThread | None = None
+        self._sm_timer = QTimer(self)
+        self._sm_timer.setTimerType(Qt.PreciseTimer)
+        self._sm_timer.timeout.connect(self._sm_tick)
+        self._sm_last = 0.0
+        self._sm_moving = False
         self._pending_files: list[str] = []
 
         self.setWindowTitle(f"{APP_NAME}  v{VERSION}")
@@ -161,6 +169,9 @@ class MainWindow(QMainWindow):
         self.a_persp = self._act("Perspektive", self._toggle_perspective, "P", checkable=True,
                                  tip="Perspektivische Projektion (P)")
         self.a_axes = self._act("Achsenkreuz", self._toggle_axes, checkable=True)
+        self.a_lod = self._act("Kanten beim Bewegen ausblenden (große Modelle)", self._toggle_lod,
+                               checkable=True,
+                               tip="Ab ca. 1500 Bauteilen werden die Kanten beim Drehen ausgeblendet – flüssiger")
         self.a_axes.setChecked(True)
 
         self.bg_group = QActionGroup(self)
@@ -226,6 +237,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(self.a_persp)
         m.addAction(self.a_axes)
+        m.addAction(self.a_lod)
         bm = m.addMenu("Hintergrund")
         for a in self.bg_actions.values():
             bm.addAction(a)
@@ -315,6 +327,9 @@ class MainWindow(QMainWindow):
         persp = self.settings.value("perspective", False, type=bool)
         self.a_persp.setChecked(persp)
         self.viewport.camera.SetParallelProjection(not persp)
+        lod = self.settings.value("lod", True, type=bool)
+        self.a_lod.setChecked(lod)
+        self.viewport.lod_enabled = lod
         axes = self.settings.value("axes", True, type=bool)
         self.a_axes.setChecked(axes)
         self._update_recent_menu()
@@ -330,6 +345,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("quality", self.quality)
         self.settings.setValue("perspective", self.a_persp.isChecked())
         self.settings.setValue("axes", self.a_axes.isChecked())
+        self.settings.setValue("lod", self.a_lod.isChecked())
         self.settings.setValue("spacemouse", self.a_spacemouse.isChecked())
         if self.sm_thread is not None:
             self.sm_thread.stop()
@@ -533,30 +549,23 @@ class MainWindow(QMainWindow):
 
     @Slot(QTreeWidgetItem, int)
     def _on_item_changed(self, item, column):
+        """Qt meldet beim Abhaken einer Gruppe jedes Unterelement einzeln.
+        Nur Bauteile (Blätter) werden gesammelt und gemeinsam aktualisiert."""
         if self._updating_tree:
             return
-        # Nur Blätter steuern die Sichtbarkeit; Qt aktualisiert Eltern automatisch
-        it = QTreeWidgetItemIterator(item)
-        while it.value():
-            cur = it.value()
-            if cur is not item and not self._is_descendant(cur, item):
-                break
-            node = cur.data(0, ROLE_NODE)
-            if node is not None and node.mesh_key:
-                p = self.part_map.get(id(node))
-                if p is not None:
-                    self.viewport.set_part_visible(p, cur.checkState(0) == Qt.Checked)
-            it += 1
-        self.viewport.render()
+        node = item.data(0, ROLE_NODE)
+        if node is None or not node.mesh_key:
+            return
+        p = self.part_map.get(id(node))
+        if p is not None:
+            self._vis_changes[id(p)] = (p, item.checkState(0) == Qt.Checked)
+            if not self._vis_timer.isActive():
+                self._vis_timer.start(0)
 
-    @staticmethod
-    def _is_descendant(item, ancestor) -> bool:
-        p = item.parent()
-        while p is not None:
-            if p is ancestor:
-                return True
-            p = p.parent()
-        return False
+    def _apply_visibility(self):
+        changes = list(self._vis_changes.values())
+        self._vis_changes.clear()
+        self.viewport.set_parts_visible(changes)
 
     def _on_tree_selection(self):
         parts = self._parts_of_items(self.tree.selectedItems())
@@ -671,6 +680,9 @@ class MainWindow(QMainWindow):
     def _toggle_perspective(self, on):
         self.viewport.set_parallel(not on)
 
+    def _toggle_lod(self, on):
+        self.viewport.lod_enabled = on
+
     def _toggle_axes(self, on):
         self.viewport.set_axes_visible(on)
 
@@ -718,17 +730,39 @@ class MainWindow(QMainWindow):
     def _toggle_spacemouse(self, on):
         if on and self.sm_thread is None:
             self.sm_thread = spacemouse.SpaceMouseThread(self)
-            self.sm_thread.motion.connect(self.viewport.apply_spacemouse)
             self.sm_thread.button.connect(self._on_sm_button)
             self.sm_thread.status.connect(self.sm_label.setText)
             self.sm_thread.finished.connect(self._on_sm_finished)
             self.sm_thread.start()
+            self._sm_last = time.perf_counter()
+            self._sm_moving = False
+            self._sm_timer.start(15)
         elif not on and self.sm_thread is not None:
+            self._sm_timer.stop()
             self.sm_thread.stop()
             self.sm_thread = None
             self.sm_label.setText("")
 
+    def _sm_tick(self):
+        """Einmal pro Bild den aktuellen SpaceMouse-Zustand anwenden."""
+        if self.sm_thread is None:
+            return
+        state = self.sm_thread.poll()
+        now = time.perf_counter()
+        dt = now - self._sm_last
+        self._sm_last = now
+        if any(state):
+            if not self._sm_moving:
+                self._sm_moving = True
+                self.viewport.begin_interaction()
+                dt = 1 / 60
+            self.viewport.apply_spacemouse(*state, dt=dt)
+        elif self._sm_moving:
+            self._sm_moving = False
+            self.viewport.end_interaction(250)
+
     def _on_sm_finished(self):
+        self._sm_timer.stop()
         self.sm_thread = None
 
     def _on_sm_button(self, idx):

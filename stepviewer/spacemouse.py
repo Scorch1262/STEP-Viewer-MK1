@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -59,7 +60,13 @@ def _axis(raw: int) -> float:
 
 
 class SpaceMouseThread(QThread):
-    motion = Signal(float, float, float, float, float, float)
+    """Liest die SpaceMouse und hält nur den AKTUELLEN Zustand bereit.
+
+    Die Oberfläche fragt den Zustand einmal pro Bild ab (poll). Dadurch stauen
+    sich keine Bewegungsmeldungen auf, wenn ein Bild länger dauert – die Ansicht
+    folgt der Hand ohne Nachlauf.
+    """
+
     button = Signal(int)
     status = Signal(str)
 
@@ -67,10 +74,20 @@ class SpaceMouseThread(QThread):
         super().__init__(parent)
         self._running = True
         self._buttons = 0
+        self._lock = threading.Lock()
+        self._state = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     def stop(self):
         self._running = False
         self.wait(1000)
+
+    def poll(self) -> tuple:
+        with self._lock:
+            return self._state
+
+    def _set(self, t, r):
+        with self._lock:
+            self._state = (t[0], t[1], t[2], r[0], r[1], r[2])
 
     def run(self):  # noqa: C901
         if hid is None:
@@ -90,14 +107,15 @@ class SpaceMouseThread(QThread):
         self.status.emit(f"SpaceMouse verbunden: {name}")
         t = [0.0, 0.0, 0.0]
         r = [0.0, 0.0, 0.0]
-        last_emit = 0.0
+        last_report = 0.0
         try:
             while self._running:
                 try:
-                    data = device.read(64, 20)
+                    data = device.read(64, 10)
                 except Exception:  # noqa: BLE001
                     self.status.emit("SpaceMouse: Verbindung verloren")
                     break
+                now = time.monotonic()
                 if data:
                     rid = data[0]
                     if rid == 1 and len(data) >= 7:
@@ -106,9 +124,11 @@ class SpaceMouseThread(QThread):
                         if len(data) >= 13:
                             rx, ry, rz = struct.unpack("<hhh", bytes(data[7:13]))
                             r = [_axis(rx), _axis(ry), _axis(rz)]
+                        last_report = now
                     elif rid == 2 and len(data) >= 7:
                         rx, ry, rz = struct.unpack("<hhh", bytes(data[1:7]))
                         r = [_axis(rx), _axis(ry), _axis(rz)]
+                        last_report = now
                     elif rid == 3 and len(data) >= 2:
                         state = data[1] | ((data[2] << 8) if len(data) > 2 else 0)
                         pressed = state & ~self._buttons
@@ -116,15 +136,14 @@ class SpaceMouseThread(QThread):
                         for bit in range(16):
                             if pressed & (1 << bit):
                                 self.button.emit(bit)
-                now = time.monotonic()
-                if now - last_emit >= 1 / 60 and any(t + r):
-                    last_emit = now
-                    self.motion.emit(t[0], t[1], t[2], r[0], r[1], r[2])
-                if not data and any(t + r) and now - last_emit > 0.25:
+                    self._set(t, r)
+                elif any(t + r) and now - last_report > 0.2:
                     # Gerät meldet beim Loslassen nicht immer 0 – Werte zurücksetzen
                     t = [0.0, 0.0, 0.0]
                     r = [0.0, 0.0, 0.0]
+                    self._set(t, r)
         finally:
+            self._set([0.0] * 3, [0.0] * 3)
             try:
                 device.close()
             except Exception:  # noqa: BLE001
